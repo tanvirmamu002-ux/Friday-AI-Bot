@@ -1,36 +1,34 @@
-# [Project name]
+# Telegram Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A simple Telegram bot built with python-telegram-bot. Responds to commands and echoes messages.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `python bot/src/bot.py` — run the bot (via the "Telegram Bot" workflow)
+- `python -m pytest bot/tests/ -v` — run unit tests
+- Required env: `TELEGRAM_BOT_TOKEN` — bot token from @BotFather on Telegram
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.12
+- python-telegram-bot 22.x (polling mode)
+- pytest + pytest-asyncio for testing
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `bot/src/bot.py` — all bot logic: command handlers and message handler
+- `bot/tests/test_bot.py` — unit tests for handlers
+- `bot/README.md` — usage and extension guide
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Uses long-polling (not webhooks) — simpler setup, no public URL required
+- All handlers are async functions registered via `CommandHandler` / `MessageHandler`
+- Token loaded from `TELEGRAM_BOT_TOKEN` environment variable — never hardcoded
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+A Telegram bot that supports `/start`, `/help`, `/echo`, and `/about` commands, and echoes any plain text message back to the sender.
 
 ## User preferences
 
@@ -38,8 +36,9 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Bot token must be set as `TELEGRAM_BOT_TOKEN` secret before running
+- Only one instance of the bot should run at a time (Telegram rejects multiple pollers)
 
 ## Pointers
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- See `bot/README.md` for a guide to adding new commands
