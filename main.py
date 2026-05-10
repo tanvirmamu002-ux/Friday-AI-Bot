@@ -6,6 +6,8 @@ import time
 import sqlite3
 import logging
 import threading
+from flask import Flask
+from threading import Thread
 from datetime import datetime, date
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
@@ -656,6 +658,8 @@ def resolve_target(message) -> int | None:
     return None
 
 def admin_only(func):
+    import functools
+    @functools.wraps(func)
     def wrapper(message):
         if message.from_user.id != MY_ID:
             return
@@ -749,8 +753,10 @@ def _backup_loop():
         time.sleep(86400)
         _do_backup()
 
-# ==================================================
+# 
+
 # STARTUP
+
 # ==================================================
 
 init_db()
@@ -761,6 +767,33 @@ log.info("Backup scheduler started (24h interval)")
 
 log.info(f"Gemini keys loaded: {len(GEMINI_KEYS)}")
 log.info(f"DuckDuckGo search: {'enabled' if DDG_AVAILABLE else 'disabled'}")
+
+# =========================================
+# KEEP ALIVE SYSTEM
+# =========================================
+
+FLASK_PORT = int(os.environ.get("PORT", 5000))
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Friday AI Bot is alive!", 200
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "bot": "running"}, 200
+
+def _run_flask():
+    import logging as _lg
+    _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
+    app.run(host="0.0.0.0", port=FLASK_PORT)
+
+flask_thread = Thread(target=_run_flask, daemon=True)
+flask_thread.start()
+log.info(f"Flask keep-alive running on port {FLASK_PORT}")
+
 log.info("✅ Bot starting...")
 
 bot.infinity_polling(timeout=30, long_polling_timeout=10)
+log.info("❌ Bot stopped")

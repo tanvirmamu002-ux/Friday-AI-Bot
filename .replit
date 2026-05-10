@@ -25,11 +25,12 @@ name = "Telegram Bot"
 author = "agent"
 
 [workflows.workflow.metadata]
-outputType = "console"
+outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
+waitForPort = 5000
 
 [agent]
 stack = "PNPM_WORKSPACE"
@@ -38,6 +39,10 @@ expertMode = true
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
+
+[[ports]]
+localPort = 5000
+externalPort = 5000
 
 [[ports]]
 localPort = 8080
@@ -54,6 +59,10 @@ externalPort = 3000
 [[ports]]
 localPort = 8083
 externalPort = 3001
+
+[[ports]]
+localPort = 8084
+externalPort = 3002
 
 [nix]
 channel = "stable-25_05"
