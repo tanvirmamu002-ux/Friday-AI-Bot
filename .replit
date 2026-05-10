@@ -47,5 +47,21 @@ externalPort = 8080
 localPort = 8081
 externalPort = 80
 
+[[ports]]
+localPort = 8082
+externalPort = 3000
+
+[[ports]]
+localPort = 8083
+externalPort = 3001
+
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+GEMINI_KEY_1 = "AIzaSyD6ssOyp2xrQB_t5ZNFiWlNXSZnEzPBYFw"
+GEMINI_KEY_2 = "AIzaSyDBLHOjDV386-6aSx-NGtVvqEMVl9lxT0M"
+GEMINI_KEY_3 = "AIzaSyCmQwXL9sW6vX5ctkhhfT--9xJgnyS9a10"
+BOT_TOKEN = "8738670027:AAEo-Q4Kqpm-oaP5nmN0fWdXvx8ItJ8iF4w"
