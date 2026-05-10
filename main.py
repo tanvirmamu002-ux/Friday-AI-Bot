@@ -6,6 +6,7 @@ import time
 import sqlite3
 import logging
 import threading
+from pathlib import Path
 from flask import Flask
 from threading import Thread
 from datetime import datetime, date
@@ -61,6 +62,35 @@ if not GEMINI_KEYS:
 
 bot      = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 executor = ThreadPoolExecutor(max_workers=THREAD_WORKERS)
+
+# ==================================================
+# CONFIG FILE LOADER
+# ==================================================
+
+CONFIG_DIR = Path("config")
+
+def load_config(filename: str) -> str:
+    """Load a config file, return empty string if not found."""
+    path = CONFIG_DIR / filename
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+def load_all_configs() -> dict:
+    """Load all config files and return as dict."""
+    return {
+        "owner_identity":  load_config("owner_identity.txt"),
+        "reply_tone":      load_config("reply_tone.txt"),
+        "forbidden_topics":load_config("forbidden_topics.txt"),
+        "knowledge_base":  load_config("knowledge_base.txt"),
+        "rag_control":     load_config("rag_control.txt"),
+        "override_rules":  load_config("override_rules.txt"),
+    }
+
+# Load once at startup, reload on demand
+_configs = load_all_configs()
+log.info(f"Config files loaded: {sum(1 for v in _configs.values() if v)} / {len(_configs)}")
 
 # ==================================================
 # NSFW / MALICIOUS FILTER
@@ -208,20 +238,38 @@ def build_context_prompt(user_id: int, new_message: str, user_data: dict) -> str
         role = "User" if msg["role"] == "user" else "Assistant"
         context_lines.append(f"{role}: {msg['content']}")
 
-    policy = user_data.get("policy", "").strip()
+    policy      = user_data.get("policy", "").strip()
     custom_info = user_data.get("custom_info", "").strip()
 
-    system_parts = ["তুমি একটি বুদ্ধিমান AI assistant। বাংলা ও ইংরেজি উভয়ে উত্তর দিতে পারো।"]
-    if policy:
-        system_parts.append(f"Policy: {policy}")
-    if custom_info:
-        system_parts.append(f"User Info: {custom_info}")
+    # --- Build system prompt from config files (highest priority) ---
+    cfg = _configs
+    system_sections = []
 
-    system_prompt = " | ".join(system_parts)
+    if cfg.get("owner_identity"):
+        system_sections.append(f"=== OWNER & IDENTITY ===\n{cfg['owner_identity']}")
+    if cfg.get("override_rules"):
+        system_sections.append(f"=== OVERRIDE RULES (highest priority) ===\n{cfg['override_rules']}")
+    if cfg.get("forbidden_topics"):
+        system_sections.append(f"=== FORBIDDEN TOPICS ===\n{cfg['forbidden_topics']}")
+    if cfg.get("reply_tone"):
+        system_sections.append(f"=== REPLY TONE ===\n{cfg['reply_tone']}")
+    if cfg.get("knowledge_base"):
+        system_sections.append(f"=== KNOWLEDGE BASE ===\n{cfg['knowledge_base']}")
+    if cfg.get("rag_control"):
+        system_sections.append(f"=== RAG CONTROL ===\n{cfg['rag_control']}")
+
+    # Per-user overrides from DB (admin-set)
+    if policy:
+        system_sections.append(f"=== USER POLICY (admin-set) ===\n{policy}")
+    if custom_info:
+        system_sections.append(f"=== USER CUSTOM INFO ===\n{custom_info}")
+
+    system_prompt = "\n\n".join(system_sections) if system_sections else \
+        "তুমি একটি বুদ্ধিমান AI assistant। বাংলা ও ইংরেজি উভয়ে উত্তর দিতে পারো।"
 
     if context_lines:
         history_str = "\n".join(context_lines[-SESSION_MAX_PAIRS * 2:])
-        return f"{system_prompt}\n\nConversation so far:\n{history_str}\n\nUser: {new_message}\nAssistant:"
+        return f"{system_prompt}\n\n--- Conversation so far ---\n{history_str}\n\nUser: {new_message}\nAssistant:"
     else:
         return f"{system_prompt}\n\nUser: {new_message}\nAssistant:"
 
@@ -415,16 +463,50 @@ def cmd_start(message):
 
     text = (
         f"হ্যালো <b>{eh(user_name)}</b>! 👋\n\n"
-        "আমি একটি Advanced AI Assistant Bot।\n\n"
-        "<b>Commands:</b>\n"
+        "আমি <b>Friday AI</b> — একটি Advanced AI Assistant।\n"
+        "নির্মাতা: <b>বোরহান</b> (<a href='https://t.me/hm_burhan'>@hm_burhan</a>)\n\n"
+        "<b>📋 Commands:</b>\n"
         "🔍 /search ‹keyword› — Smart Web Search\n"
         "🎬 /yt ‹keyword› — YouTube Search\n"
         "🖼 /image ‹keyword› — Image Search\n"
+        "📊 /status — আপনার account status\n"
         "🔁 /clear — কথোপকথন মুছুন\n\n"
-        "সরাসরি যেকোনো প্রশ্ন করুন অথবা ছবি পাঠান!"
+        "সরাসরি যেকোনো প্রশ্ন করুন অথবা ছবি পাঠান! 🤖"
     )
     bot.reply_to(message, text, parse_mode="HTML")
     send_log(user_id, user_name, f"🚀 <b>New /start</b>\n👤 <b>{eh(user_name)}</b>\n🆔 <code>{user_id}</code>")
+
+# ==================================================
+# HANDLERS — /status
+# ==================================================
+
+@bot.message_handler(commands=["status"])
+def cmd_status(message):
+    if message.chat.type != "private":
+        return
+    user_id   = message.from_user.id
+    user_name = message.from_user.first_name or "User"
+    upsert_user(user_id, user_name)
+    reset_daily_if_needed(user_id)
+    user = get_user(user_id)
+    if not user:
+        bot.reply_to(message, "তথ্য পাওয়া যায়নি।"); return
+
+    remaining = max(0, user["daily_limit"] - user["daily_count"])
+    premium_badge = "⭐ Premium" if user["is_premium"] else "🆓 Free"
+    banned_badge  = "🚫 Banned" if user["is_banned"]  else "✅ Active"
+
+    text = (
+        f"📊 <b>Account Status</b>\n\n"
+        f"👤 Name: <b>{eh(user_name)}</b>\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"🏷 Plan: {premium_badge}\n"
+        f"🔰 Status: {banned_badge}\n\n"
+        f"📈 আজকের ব্যবহার: <b>{user['daily_count']}</b> / {user['daily_limit']}\n"
+        f"✨ বাকি requests: <b>{remaining}</b>\n\n"
+        f"<i>Powered by Friday AI | Made by @hm_burhan</i>"
+    )
+    bot.reply_to(message, text, parse_mode="HTML")
 
 # ==================================================
 # HANDLERS — /clear session
@@ -665,6 +747,19 @@ def admin_only(func):
             return
         return func(message)
     return wrapper
+
+@bot.message_handler(commands=["reload"])
+@admin_only
+def cmd_reload(message):
+    """Reload all config files from disk without restarting the bot."""
+    global _configs
+    _configs = load_all_configs()
+    loaded = sum(1 for v in _configs.values() if v)
+    bot.reply_to(
+        message,
+        f"✅ Config reloaded! {loaded}/{len(_configs)} files loaded successfully.",
+    )
+    log.info(f"Config reloaded by admin: {loaded} files")
 
 @bot.message_handler(commands=["ban"])
 @admin_only
