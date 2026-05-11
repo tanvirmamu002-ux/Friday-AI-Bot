@@ -1,209 +1,96 @@
+"""
+Friday AI — Advanced Telegram Bot
+Author  : Burhan (@hm_burhan)
+Engine  : Google Gemini (gemini-flash-lite-latest)
+"""
+
 import os
 import sys
-import uuid
 import html
 import time
-import sqlite3
 import logging
 import threading
-from pathlib import Path
-from flask import Flask
-from threading import Thread
-from datetime import datetime, date
-from collections import defaultdict, deque
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict, deque
 
 import telebot
-from telebot import types
-from google import genai
-from PIL import Image
 
-try:
-    from duckduckgo_search import DDGS
-    DDG_AVAILABLE = True
-except ImportError:
-    DDG_AVAILABLE = False
+# ── Local modules ──────────────────────────────────────────────────────────────
+import database       as db
+import ai_logic       as ai
+import search_engine  as se
+import image_tools    as it
+import keep_alive
 
-# ==================================================
-# LOGGING SETUP
-# ==================================================
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ══════════════════════════════════════════════════════════════════════════════
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger(__name__)
+log = logging.getLogger("friday")
 
-# ==================================================
+# ══════════════════════════════════════════════════════════════════════════════
 # CONFIG
-# ==================================================
+# ══════════════════════════════════════════════════════════════════════════════
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN")
 MY_ID        = int(os.environ.get("ADMIN_ID", "8234592104"))
 LOG_GROUP_ID = int(os.environ.get("LOG_GROUP_ID", "-1003848412289"))
-DB_PATH      = "bot_data.db"
-MODEL_NAME   = "gemini-flash-lite-latest"
 
-MAX_REQ_PER_MIN   = 9
-SESSION_MAX_PAIRS = 10   # last 10 exchanges kept in memory
-THREAD_WORKERS    = 10
-
-GEMINI_KEYS = [k for k in [
+GEMINI_KEYS = [
     os.environ.get("GEMINI_KEY_1"),
     os.environ.get("GEMINI_KEY_2"),
     os.environ.get("GEMINI_KEY_3"),
-] if k]
+]
+
+MAX_REQ_PER_MIN = 9
+THREAD_WORKERS  = 12
+
+# ── Validation ─────────────────────────────────────────────────────────────────
 
 if not BOT_TOKEN:
-    log.error("BOT_TOKEN পাওয়া যায়নি!"); sys.exit(1)
-if not GEMINI_KEYS:
-    log.error("কোনো Gemini key পাওয়া যায়নি!"); sys.exit(1)
+    log.error("BOT_TOKEN not set — exiting"); sys.exit(1)
+if not any(GEMINI_KEYS):
+    log.error("No Gemini keys set — exiting"); sys.exit(1)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INIT
+# ══════════════════════════════════════════════════════════════════════════════
 
 bot      = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 executor = ThreadPoolExecutor(max_workers=THREAD_WORKERS)
 
-# ==================================================
-# CONFIG FILE LOADER
-# ==================================================
+db.init_db()
+ai.init_gemini(GEMINI_KEYS)
+ai.reload_configs()
 
-CONFIG_DIR = Path("config")
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 
-def load_config(filename: str) -> str:
-    """Load a config file, return empty string if not found."""
-    path = CONFIG_DIR / filename
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+def eh(text: str) -> str:
+    """Escape HTML for safe Telegram messages."""
+    return html.escape(str(text))
 
-def load_all_configs() -> dict:
-    """Load all config files and return as dict."""
-    return {
-        "owner_identity":  load_config("owner_identity.txt"),
-        "reply_tone":      load_config("reply_tone.txt"),
-        "forbidden_topics":load_config("forbidden_topics.txt"),
-        "knowledge_base":  load_config("knowledge_base.txt"),
-        "rag_control":     load_config("rag_control.txt"),
-        "override_rules":  load_config("override_rules.txt"),
-    }
 
-# Load once at startup, reload on demand
-_configs = load_all_configs()
-log.info(f"Config files loaded: {sum(1 for v in _configs.values() if v)} / {len(_configs)}")
+def is_admin(user_id: int) -> bool:
+    return user_id == MY_ID
 
-# ==================================================
-# NSFW / MALICIOUS FILTER
-# ==================================================
 
-NSFW_WORDS = {
-    "porn", "xxx", "nude", "naked", "sex video", "adult content",
-    "hentai", "onlyfans", "escort", "hack", "crack", "warez",
-    "torrent piracy", "malware", "exploit", "ransomware", "phishing",
-}
-
-def is_safe_result(title: str, snippet: str, url: str) -> bool:
-    combined = f"{title} {snippet} {url}".lower()
-    return not any(w in combined for w in NSFW_WORDS)
-
-# ==================================================
-# DATABASE
-# ==================================================
-
-_db_lock = threading.Lock()
-
-def get_db():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-def init_db():
-    with _db_lock, get_db() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id     INTEGER PRIMARY KEY,
-                user_name   TEXT,
-                is_banned   INTEGER DEFAULT 0,
-                is_premium  INTEGER DEFAULT 0,
-                daily_count INTEGER DEFAULT 0,
-                daily_limit INTEGER DEFAULT 50,
-                last_reset  TEXT    DEFAULT '',
-                topic_id    INTEGER,
-                custom_info TEXT    DEFAULT '',
-                policy      TEXT    DEFAULT ''
-            );
-        """)
-        conn.commit()
-    log.info("Database ready")
-
-def upsert_user(user_id: int, user_name: str):
-    today = str(date.today())
-    with _db_lock, get_db() as conn:
-        conn.execute("""
-            INSERT INTO users (user_id, user_name, last_reset)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET user_name=excluded.user_name
-        """, (user_id, user_name, today))
-        conn.commit()
-
-def get_user(user_id: int) -> dict | None:
-    with _db_lock, get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM users WHERE user_id=?", (user_id,)
-        ).fetchone()
-    if not row:
-        return None
-    cols = ["user_id","user_name","is_banned","is_premium",
-            "daily_count","daily_limit","last_reset","topic_id","custom_info","policy"]
-    return dict(zip(cols, row))
-
-def reset_daily_if_needed(user_id: int):
-    today = str(date.today())
-    with _db_lock, get_db() as conn:
-        conn.execute("""
-            UPDATE users
-            SET daily_count=0, last_reset=?
-            WHERE user_id=? AND last_reset != ?
-        """, (today, user_id, today))
-        conn.commit()
-
-def increment_daily_count(user_id: int):
-    with _db_lock, get_db() as conn:
-        conn.execute(
-            "UPDATE users SET daily_count=daily_count+1 WHERE user_id=?",
-            (user_id,)
-        )
-        conn.commit()
-
-def set_topic_id(user_id: int, topic_id: int):
-    with _db_lock, get_db() as conn:
-        conn.execute(
-            "UPDATE users SET topic_id=? WHERE user_id=?",
-            (topic_id, user_id)
-        )
-        conn.commit()
-
-def get_user_by_topic(topic_id: int) -> int | None:
-    with _db_lock, get_db() as conn:
-        row = conn.execute(
-            "SELECT user_id FROM users WHERE topic_id=?", (topic_id,)
-        ).fetchone()
-    return row[0] if row else None
-
-def set_user_field(user_id: int, field: str, value):
-    allowed = {"is_banned","is_premium","daily_limit","custom_info","policy"}
-    if field not in allowed:
-        return
-    with _db_lock, get_db() as conn:
-        conn.execute(f"UPDATE users SET {field}=? WHERE user_id=?", (value, user_id))
-        conn.commit()
-
-# ==================================================
-# RATE LIMITING  (9 req / 60s per user)
-# ==================================================
+# ── Rate limiter ───────────────────────────────────────────────────────────────
 
 _rate_data: dict[int, deque] = defaultdict(lambda: deque())
 _rate_lock = threading.Lock()
 
+
 def is_rate_limited(user_id: int) -> bool:
+    if is_admin(user_id):
+        return False
     now = time.time()
     with _rate_lock:
         dq = _rate_data[user_id]
@@ -214,523 +101,182 @@ def is_rate_limited(user_id: int) -> bool:
         dq.append(now)
         return False
 
-# ==================================================
-# SESSION MEMORY
-# ==================================================
 
-_sessions: dict[int, list] = defaultdict(list)
-_session_lock = threading.Lock()
+# ── Access check ───────────────────────────────────────────────────────────────
 
-def add_to_session(user_id: int, role: str, content: str):
-    with _session_lock:
-        session = _sessions[user_id]
-        session.append({"role": role, "content": content})
-        # Keep only last SESSION_MAX_PAIRS * 2 items
-        if len(session) > SESSION_MAX_PAIRS * 2:
-            _sessions[user_id] = session[-(SESSION_MAX_PAIRS * 2):]
+def check_user_access(message) -> bool:
+    """
+    Return True if the user may proceed.
+    Admin: unlimited, no restrictions.
+    Normal users: track usage but do NOT enforce daily limit (temporarily disabled).
+    """
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
 
-def build_context_prompt(user_id: int, new_message: str, user_data: dict) -> str:
-    with _session_lock:
-        history = list(_sessions[user_id])
+    # Admin bypass — always allowed
+    if is_admin(uid):
+        return True
 
-    context_lines = []
-    for msg in history:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        context_lines.append(f"{role}: {msg['content']}")
+    db.upsert_user(uid, uname)
+    db.reset_daily_if_needed(uid)
+    user = db.get_user(uid)
 
-    policy      = user_data.get("policy", "").strip()
-    custom_info = user_data.get("custom_info", "").strip()
+    if not user:
+        return True
 
-    # --- Build system prompt from config files (highest priority) ---
-    cfg = _configs
-    system_sections = []
+    if user["is_banned"]:
+        bot.reply_to(message, "🚫 আপনি banned আছেন। Admin-এর সাথে যোগাযোগ করুন।")
+        return False
 
-    if cfg.get("owner_identity"):
-        system_sections.append(f"=== OWNER & IDENTITY ===\n{cfg['owner_identity']}")
-    if cfg.get("override_rules"):
-        system_sections.append(f"=== OVERRIDE RULES (highest priority) ===\n{cfg['override_rules']}")
-    if cfg.get("forbidden_topics"):
-        system_sections.append(f"=== FORBIDDEN TOPICS ===\n{cfg['forbidden_topics']}")
-    if cfg.get("reply_tone"):
-        system_sections.append(f"=== REPLY TONE ===\n{cfg['reply_tone']}")
-    if cfg.get("knowledge_base"):
-        system_sections.append(f"=== KNOWLEDGE BASE ===\n{cfg['knowledge_base']}")
-    if cfg.get("rag_control"):
-        system_sections.append(f"=== RAG CONTROL ===\n{cfg['rag_control']}")
+    if is_rate_limited(uid):
+        bot.reply_to(
+            message,
+            f"⏳ আপনি প্রতি মিনিটে সর্বোচ্চ {MAX_REQ_PER_MIN}টি request করতে পারবেন। একটু অপেক্ষা করুন।"
+        )
+        return False
 
-    # Per-user overrides from DB (admin-set)
-    if policy:
-        system_sections.append(f"=== USER POLICY (admin-set) ===\n{policy}")
-    if custom_info:
-        system_sections.append(f"=== USER CUSTOM INFO ===\n{custom_info}")
+    # Daily limit tracking (enforcement disabled temporarily)
+    # if user["daily_count"] >= user["daily_limit"]:
+    #     bot.reply_to(message, f"📊 আজকের limit ({user['daily_limit']}) শেষ।")
+    #     return False
 
-    system_prompt = "\n\n".join(system_sections) if system_sections else \
-        "তুমি একটি বুদ্ধিমান AI assistant। বাংলা ও ইংরেজি উভয়ে উত্তর দিতে পারো।"
+    return True
 
-    if context_lines:
-        history_str = "\n".join(context_lines[-SESSION_MAX_PAIRS * 2:])
-        return f"{system_prompt}\n\n--- Conversation so far ---\n{history_str}\n\nUser: {new_message}\nAssistant:"
-    else:
-        return f"{system_prompt}\n\nUser: {new_message}\nAssistant:"
 
-# ==================================================
-# GEMINI AI
-# ==================================================
+# ── Thumbs-up reaction ─────────────────────────────────────────────────────────
 
-_key_index = 0
-_key_lock  = threading.Lock()
-
-def generate_ai_response(prompt: str, image=None) -> str:
-    global _key_index
-    total = len(GEMINI_KEYS)
-    for _ in range(total):
-        with _key_lock:
-            idx = _key_index
-            api_key = GEMINI_KEYS[idx]
-        try:
-            client = genai.Client(api_key=api_key)
-            contents = [prompt, image] if image else prompt
-            resp = client.models.generate_content(model=MODEL_NAME, contents=contents)
-            text = resp.text.strip() if resp.text else None
-            if text:
-                return text
-        except Exception as e:
-            log.warning(f"Gemini key {idx+1} failed: {e}")
-            with _key_lock:
-                _key_index = (_key_index + 1) % total
-    return "দুঃখিত, AI সার্ভিস এখন unavailable। একটু পরে চেষ্টা করুন।"
-
-# ==================================================
-# DUCKDUCKGO HYBRID SEARCH + AI SUMMARIZATION
-# ==================================================
-
-def web_search_and_summarize(query: str) -> str:
-    if not DDG_AVAILABLE:
-        return generate_ai_response(query)
-
+def react_ok(chat_id: int, message_id: int):
     try:
-        with DDGS() as ddgs:
-            raw_results = list(ddgs.text(query, max_results=8))
-    except Exception as e:
-        log.warning(f"DuckDuckGo search failed: {e}")
-        return generate_ai_response(query)
+        bot.set_message_reaction(
+            chat_id, message_id,
+            [telebot.types.ReactionTypeEmoji("👍")]
+        )
+    except Exception:
+        pass
 
-    safe_results = [
-        r for r in raw_results
-        if is_safe_result(r.get("title",""), r.get("body",""), r.get("href",""))
-    ]
 
-    if not safe_results:
-        return generate_ai_response(query)
-
-    snippets = ""
-    for i, r in enumerate(safe_results[:5], 1):
-        title   = r.get("title", "")[:120]
-        body    = r.get("body",  "")[:200]
-        snippets += f"{i}. {title}\n   {body}\n\n"
-
-    rag_prompt = (
-        f"নিচের web search results ব্যবহার করে প্রশ্নের উত্তর দাও। "
-        f"NSFW বা ক্ষতিকর তথ্য বাদ দাও। বাংলা বা ইংরেজিতে সংক্ষিপ্ত ও নির্ভুল উত্তর দাও।\n\n"
-        f"Search Results:\n{snippets}\n"
-        f"Question: {query}"
-    )
-    return generate_ai_response(rag_prompt)
-
-# ==================================================
+# ══════════════════════════════════════════════════════════════════════════════
 # FORUM TOPIC LOGGING
-# ==================================================
+# ══════════════════════════════════════════════════════════════════════════════
 
-_topic_creation_lock = threading.Lock()
+_topic_lock = threading.Lock()
+TG_MAX_LEN  = 4096
+
+
+def _send_chunks(chat_id: int, text: str, thread_id: int | None, parse_mode: str = "HTML"):
+    """Send message splitting at TG_MAX_LEN chars if needed."""
+    for i in range(0, max(len(text), 1), TG_MAX_LEN):
+        chunk = text[i:i + TG_MAX_LEN]
+        try:
+            if thread_id:
+                bot.send_message(chat_id, chunk,
+                                 message_thread_id=thread_id, parse_mode=parse_mode)
+            else:
+                bot.send_message(chat_id, chunk, parse_mode=parse_mode)
+        except Exception as e:
+            log.warning(f"Chunk send failed: {e}")
+
 
 def get_or_create_topic(user_id: int, user_name: str) -> int | None:
-    user = get_user(user_id)
+    user = db.get_user(user_id)
     if user and user["topic_id"]:
         return user["topic_id"]
 
-    with _topic_creation_lock:
-        # Re-check after acquiring lock
-        user = get_user(user_id)
+    with _topic_lock:
+        user = db.get_user(user_id)
         if user and user["topic_id"]:
             return user["topic_id"]
         try:
             topic = bot.create_forum_topic(
-                LOG_GROUP_ID,
-                f"👤 {user_name} | {user_id}"
+                LOG_GROUP_ID, f"👤 {user_name} | {user_id}"
             )
             tid = topic.message_thread_id
-            set_topic_id(user_id, tid)
-            log.info(f"Created topic {tid} for user {user_id}")
+            db.set_topic_id(user_id, tid)
+            log.info(f"Forum topic {tid} created for user {user_id}")
             return tid
         except Exception as e:
             log.warning(f"Forum topic creation failed: {e}")
             return None
 
-def eh(text: str) -> str:
-    """Escape HTML for safe Telegram HTML messages."""
-    return html.escape(str(text))
 
 def send_log(user_id: int, user_name: str, text: str):
-    """Send log message to user's forum topic (fallback: plain group message)."""
-    topic_id = get_or_create_topic(user_id, user_name)
+    """Log message to user's forum topic (fallback: plain group)."""
     try:
-        if topic_id:
-            bot.send_message(
-                LOG_GROUP_ID,
-                text,
-                message_thread_id=topic_id,
-                parse_mode="HTML"
-            )
+        tid = get_or_create_topic(user_id, user_name)
+        if tid:
+            _send_chunks(LOG_GROUP_ID, text, tid)
         else:
-            bot.send_message(
-                LOG_GROUP_ID,
-                f"<b>👤 {eh(user_name)} ({user_id})</b>\n\n{text}",
-                parse_mode="HTML"
-            )
+            _send_chunks(LOG_GROUP_ID,
+                         f"<b>👤 {eh(user_name)} ({user_id})</b>\n\n{text}", None)
     except Exception as e:
-        log.error(f"Log send failed: {e}")
+        log.warning(f"send_log failed: {e}")
+
 
 def send_log_copy(user_id: int, user_name: str, chat_id: int, message_id: int):
-    """Copy a message into the user's log topic."""
-    topic_id = get_or_create_topic(user_id, user_name)
+    """Forward original message to user's topic."""
     try:
-        if topic_id:
-            bot.copy_message(LOG_GROUP_ID, chat_id, message_id, message_thread_id=topic_id)
-        else:
-            bot.copy_message(LOG_GROUP_ID, chat_id, message_id)
+        tid = get_or_create_topic(user_id, user_name)
+        if tid:
+            bot.forward_message(LOG_GROUP_ID, chat_id, message_id,
+                                message_thread_id=tid)
     except Exception as e:
-        log.error(f"Log copy failed: {e}")
+        log.debug(f"Forward to topic failed: {e}")
 
-# ==================================================
-# REACT TO MESSAGE
-# ==================================================
 
-def react_thumbs_up(chat_id: int, message_id: int):
+# ══════════════════════════════════════════════════════════════════════════════
+# AI CHAT HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_search_context(query: str) -> str | None:
+    """
+    Run DuckDuckGo search and return raw snippet block.
+    Returns None if search fails or isn't needed.
+    """
+    if not se.DDG_AVAILABLE:
+        return None
     try:
-        bot.set_message_reaction(
-            chat_id, message_id,
-            reaction=[types.ReactionTypeEmoji(emoji="👍")]
-        )
-    except Exception:
-        pass  # Reaction not supported or failed silently
-
-# ==================================================
-# COMMON GUARD (ban + daily limit check)
-# ==================================================
-
-def check_user_access(message) -> bool:
-    """Returns True if user can proceed. Replies with error if not."""
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-
-    upsert_user(user_id, user_name)
-    reset_daily_if_needed(user_id)
-    user = get_user(user_id)
-
-    if user and user["is_banned"]:
-        bot.reply_to(message, "⛔ আপনি এই বট ব্যবহার থেকে নিষিদ্ধ।")
-        return False
-
-    if is_rate_limited(user_id):
-        bot.reply_to(
-            message,
-            f"⚠️ আপনি প্রতি মিনিটে সর্বোচ্চ {MAX_REQ_PER_MIN}টি request করতে পারবেন। "
-            f"একটু অপেক্ষা করুন।"
-        )
-        return False
-
-    if user and user["daily_count"] >= user["daily_limit"]:
-        bot.reply_to(
-            message,
-            f"📊 আজকের limit ({user['daily_limit']}) শেষ। আগামীকাল আবার চেষ্টা করুন।"
-        )
-        return False
-
-    return True
-
-# ==================================================
-# HANDLERS — /start
-# ==================================================
-
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    if message.chat.type != "private":
-        return
-
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    upsert_user(user_id, user_name)
-
-    text = (
-        f"হ্যালো <b>{eh(user_name)}</b>! 👋\n\n"
-        "আমি <b>Friday AI</b> — একটি Advanced AI Assistant।\n"
-        "নির্মাতা: <b>বোরহান</b> (<a href='https://t.me/hm_burhan'>@hm_burhan</a>)\n\n"
-        "<b>📋 Commands:</b>\n"
-        "🔍 /search ‹keyword› — Smart Web Search\n"
-        "🎬 /yt ‹keyword› — YouTube Search\n"
-        "🖼 /image ‹keyword› — Image Search\n"
-        "📊 /status — আপনার account status\n"
-        "🔁 /clear — কথোপকথন মুছুন\n\n"
-        "সরাসরি যেকোনো প্রশ্ন করুন অথবা ছবি পাঠান! 🤖"
-    )
-    bot.reply_to(message, text, parse_mode="HTML")
-    send_log(user_id, user_name, f"🚀 <b>New /start</b>\n👤 <b>{eh(user_name)}</b>\n🆔 <code>{user_id}</code>")
-
-# ==================================================
-# HANDLERS — /status
-# ==================================================
-
-@bot.message_handler(commands=["status"])
-def cmd_status(message):
-    if message.chat.type != "private":
-        return
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    upsert_user(user_id, user_name)
-    reset_daily_if_needed(user_id)
-    user = get_user(user_id)
-    if not user:
-        bot.reply_to(message, "তথ্য পাওয়া যায়নি।"); return
-
-    remaining = max(0, user["daily_limit"] - user["daily_count"])
-    premium_badge = "⭐ Premium" if user["is_premium"] else "🆓 Free"
-    banned_badge  = "🚫 Banned" if user["is_banned"]  else "✅ Active"
-
-    text = (
-        f"📊 <b>Account Status</b>\n\n"
-        f"👤 Name: <b>{eh(user_name)}</b>\n"
-        f"🆔 ID: <code>{user_id}</code>\n"
-        f"🏷 Plan: {premium_badge}\n"
-        f"🔰 Status: {banned_badge}\n\n"
-        f"📈 আজকের ব্যবহার: <b>{user['daily_count']}</b> / {user['daily_limit']}\n"
-        f"✨ বাকি requests: <b>{remaining}</b>\n\n"
-        f"<i>Powered by Friday AI | Made by @hm_burhan</i>"
-    )
-    bot.reply_to(message, text, parse_mode="HTML")
-
-# ==================================================
-# HANDLERS — /clear session
-# ==================================================
-
-@bot.message_handler(commands=["clear"])
-def cmd_clear(message):
-    if message.chat.type != "private":
-        return
-    user_id = message.from_user.id
-    with _session_lock:
-        _sessions[user_id].clear()
-    bot.reply_to(message, "✅ কথোপকথনের ইতিহাস মুছে গেছে।")
-
-# ==================================================
-# HANDLERS — /search (hybrid RAG)
-# ==================================================
-
-@bot.message_handler(commands=["search"])
-def cmd_search(message):
-    if message.chat.type != "private":
-        return
-    if not check_user_access(message):
-        return
-
-    query = message.text.replace("/search", "", 1).strip()
-    if not query:
-        bot.reply_to(message, "ব্যবহার: /search ‹keyword›")
-        return
-
-    react_thumbs_up(message.chat.id, message.message_id)
-    executor.submit(_do_search, message, query)
-
-def _do_search(message, query: str):
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    bot.send_chat_action(message.chat.id, "typing")
-    try:
-        answer = web_search_and_summarize(query)
-        increment_daily_count(user_id)
-        bot.reply_to(message, answer)
-        send_log(user_id, user_name,
-                 f"🔍 <b>Search</b>\n<b>Query:</b> {eh(query)}\n<b>Reply:</b> {eh(answer[:400])}")
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=8))
+        safe = [
+            r for r in results
+            if se.is_safe_result(r.get("title",""), r.get("body",""), r.get("href",""))
+        ]
+        if not safe:
+            return None
+        snippets = ""
+        for i, r in enumerate(safe[:6], 1):
+            title = r.get("title","")[:150]
+            body  = r.get("body","")[:300]
+            href  = r.get("href","")[:100]
+            snippets += f"{i}. [{title}]({href})\n   {body}\n\n"
+        log.info(f"Search context built: {len(safe)} results for '{query[:50]}'")
+        return snippets
     except Exception as e:
-        log.error(f"Search handler error: {e}")
-        bot.reply_to(message, "Search করতে সমস্যা হয়েছে।")
+        log.warning(f"Search context error: {e}")
+        return None
 
-# ==================================================
-# HANDLERS — /yt YouTube search
-# ==================================================
 
-@bot.message_handler(commands=["yt"])
-def cmd_yt(message):
-    if message.chat.type != "private":
-        return
-    if not check_user_access(message):
-        return
+# ══════════════════════════════════════════════════════════════════════════════
+# ADMIN DECORATOR
+# ══════════════════════════════════════════════════════════════════════════════
 
-    query = message.text.replace("/yt", "", 1).strip()
-    if not query:
-        bot.reply_to(message, "ব্যবহার: /yt ‹keyword›")
-        return
+def admin_only(func):
+    import functools
+    @functools.wraps(func)
+    def wrapper(message):
+        if not is_admin(message.from_user.id):
+            return
+        return func(message)
+    return wrapper
 
-    react_thumbs_up(message.chat.id, message.message_id)
-    executor.submit(_do_yt_search, message, query)
-
-def _do_yt_search(message, query: str):
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    bot.send_chat_action(message.chat.id, "typing")
-    try:
-        if DDG_AVAILABLE:
-            with DDGS() as ddgs:
-                videos = list(ddgs.videos(query, max_results=5))
-            if videos:
-                text = "🎬 <b>YouTube / Video Results</b>\n\n"
-                for v in videos[:5]:
-                    title    = eh(v.get("title", "No Title")[:100])
-                    embed_url = eh(v.get("content", v.get("embed_url", "")))
-                    text += f"• <b>{title}</b>\n{embed_url}\n\n"
-                bot.reply_to(message, text, parse_mode="HTML")
-                return
-        bot.reply_to(message, "কোনো ভিডিও পাওয়া যায়নি।")
-        send_log(user_id, user_name, f"🎬 <b>YT Search</b>: {eh(query)}")
-    except Exception as e:
-        log.error(f"YT search error: {e}")
-        bot.reply_to(message, "YouTube Search Error")
-
-# ==================================================
-# HANDLERS — /image Image search
-# ==================================================
-
-@bot.message_handler(commands=["image"])
-def cmd_image(message):
-    if message.chat.type != "private":
-        return
-    if not check_user_access(message):
-        return
-
-    query = message.text.replace("/image", "", 1).strip()
-    if not query:
-        bot.reply_to(message, "ব্যবহার: /image ‹keyword›")
-        return
-
-    react_thumbs_up(message.chat.id, message.message_id)
-    executor.submit(_do_image_search, message, query)
-
-def _do_image_search(message, query: str):
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    bot.send_chat_action(message.chat.id, "upload_photo")
-    try:
-        if DDG_AVAILABLE:
-            with DDGS() as ddgs:
-                imgs = list(ddgs.images(query, max_results=10, safesearch="moderate"))
-            safe_imgs = [i for i in imgs if is_safe_result(i.get("title",""), "", i.get("image",""))]
-            if safe_imgs:
-                img_url = safe_imgs[0].get("image")
-                bot.send_photo(message.chat.id, img_url, caption=f"🖼 {query}")
-                return
-        bot.reply_to(message, "কোনো ছবি পাওয়া যায়নি।")
-        send_log(user_id, user_name, f"🖼 <b>Image Search</b>: {eh(query)}")
-    except Exception as e:
-        log.error(f"Image search error: {e}")
-        bot.reply_to(message, "Image Search Error")
-
-# ==================================================
-# HANDLERS — Photo (AI Vision)
-# ==================================================
-
-@bot.message_handler(content_types=["photo"])
-def handle_photo(message):
-    if message.chat.type != "private":
-        return
-    if not check_user_access(message):
-        return
-
-    react_thumbs_up(message.chat.id, message.message_id)
-    executor.submit(_do_photo_analysis, message)
-
-def _do_photo_analysis(message):
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    filename  = None
-    try:
-        bot.send_chat_action(message.chat.id, "typing")
-        filename = f"/tmp/{uuid.uuid4()}.jpg"
-        file_info  = bot.get_file(message.photo[-1].file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        with open(filename, "wb") as f:
-            f.write(downloaded)
-
-        img     = Image.open(filename)
-        caption = message.caption or "এই ছবিটি বিশ্লেষণ করো এবং বিস্তারিত বলো।"
-        reply   = generate_ai_response(caption, image=img)
-        increment_daily_count(user_id)
-
-        bot.reply_to(message, reply)
-        send_log_copy(user_id, user_name, message.chat.id, message.message_id)
-        send_log(user_id, user_name, f"🤖 <b>Image Reply</b>\n{eh(reply[:400])}")
-
-    except Exception as e:
-        log.error(f"Photo analysis error: {e}")
-        bot.reply_to(message, "ছবিটি বিশ্লেষণ করা যায়নি।")
-    finally:
-        if filename and os.path.exists(filename):
-            os.remove(filename)
-
-# ==================================================
-# HANDLERS — AI Text Chat (private only)
-# ==================================================
-
-@bot.message_handler(content_types=["text"])
-def handle_text(message):
-    # Groups: only admin commands (handled separately)
-    if message.chat.type != "private":
-        return
-
-    # Ignore unknown commands
-    if message.text.startswith("/"):
-        return
-
-    if not check_user_access(message):
-        return
-
-    react_thumbs_up(message.chat.id, message.message_id)
-    executor.submit(_do_ai_chat, message)
-
-def _do_ai_chat(message):
-    user_id   = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    user_text = message.text
-
-    try:
-        bot.send_chat_action(message.chat.id, "typing")
-        user_data = get_user(user_id) or {}
-        prompt    = build_context_prompt(user_id, user_text, user_data)
-        reply     = generate_ai_response(prompt)
-
-        add_to_session(user_id, "user",      user_text)
-        add_to_session(user_id, "assistant", reply)
-        increment_daily_count(user_id)
-
-        bot.reply_to(message, reply)
-        send_log(user_id, user_name,
-                 f"📩 <b>Message</b>\n{eh(user_text)}\n\n🤖 <b>Reply</b>\n{eh(reply[:400])}")
-
-    except Exception as e:
-        log.error(f"AI chat error: {e}")
-        bot.reply_to(message, "দুঃখিত, সমস্যা হয়েছে। আবার চেষ্টা করুন।")
-
-# ==================================================
-# ADMIN COMMANDS  (from topic or with user_id arg)
-# ==================================================
 
 def resolve_target(message) -> int | None:
-    """Find target user_id: from topic or from command arg."""
-    # From topic
+    """Resolve target user_id from thread topic or command arg."""
     if message.message_thread_id:
-        uid = get_user_by_topic(message.message_thread_id)
+        uid = db.get_user_by_topic(message.message_thread_id)
         if uid:
             return uid
-
-    # From arg: /ban 12345
     parts = message.text.split()
     if len(parts) >= 2:
         try:
@@ -739,36 +285,239 @@ def resolve_target(message) -> int | None:
             pass
     return None
 
-def admin_only(func):
-    import functools
-    @functools.wraps(func)
-    def wrapper(message):
-        if message.from_user.id != MY_ID:
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND HANDLERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── /start ─────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["start"])
+def cmd_start(message):
+    if message.chat.type != "private":
+        return
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    db.upsert_user(uid, uname)
+
+    text = (
+        f"হ্যালো <b>{eh(uname)}</b>! 👋\n\n"
+        "আমি <b>Friday AI</b> — একটি Advanced AI Assistant।\n"
+        "নির্মাতা: <b>বোরহান</b> (<a href='https://t.me/hm_burhan'>@hm_burhan</a>)\n\n"
+        "<b>📋 Available Commands:</b>\n"
+        "🔍 /search ‹query› — Real-time Web Search\n"
+        "🎬 /yt ‹query› — YouTube / Video Search\n"
+        "🖼 /image ‹query› — Image Search\n"
+        "✨ /enhance — ছবির মান উন্নত করুন (ছবি পাঠান)\n"
+        "📊 /status — Account Status\n"
+        "🔁 /clear — কথোপকথন মুছুন\n\n"
+        "যেকোনো প্রশ্ন করুন অথবা ছবি পাঠান! 🤖"
+    )
+    bot.reply_to(message, text, parse_mode="HTML")
+    send_log(uid, uname,
+             f"🚀 <b>New /start</b>\n👤 <b>{eh(uname)}</b>\n🆔 <code>{uid}</code>")
+
+
+# ── /status ────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["status"])
+def cmd_status(message):
+    if message.chat.type != "private":
+        return
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    db.upsert_user(uid, uname)
+    db.reset_daily_if_needed(uid)
+    user = db.get_user(uid)
+
+    if is_admin(uid):
+        bot.reply_to(message,
+                     "👑 <b>Admin Account</b>\nUnlimited usage · No restrictions",
+                     parse_mode="HTML")
+        return
+
+    if not user:
+        bot.reply_to(message, "তথ্য পাওয়া যায়নি।"); return
+
+    remaining     = max(0, user["daily_limit"] - user["daily_count"])
+    premium_badge = "⭐ Premium" if user["is_premium"] else "🆓 Free"
+    banned_badge  = "🚫 Banned"  if user["is_banned"]  else "✅ Active"
+
+    text = (
+        f"📊 <b>Account Status</b>\n\n"
+        f"👤 Name: <b>{eh(uname)}</b>\n"
+        f"🆔 ID: <code>{uid}</code>\n"
+        f"🏷 Plan: {premium_badge}\n"
+        f"🔰 Status: {banned_badge}\n\n"
+        f"📈 আজকের ব্যবহার: <b>{user['daily_count']}</b> / {user['daily_limit']}\n"
+        f"✨ বাকি requests: <b>{remaining}</b>\n\n"
+        f"<i>Powered by Friday AI | Made by @hm_burhan</i>"
+    )
+    bot.reply_to(message, text, parse_mode="HTML")
+
+
+# ── /clear ─────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["clear"])
+def cmd_clear(message):
+    if message.chat.type != "private":
+        return
+    ai.clear_session(message.from_user.id)
+    bot.reply_to(message, "✅ কথোপকথনের ইতিহাস মুছে গেছে।")
+
+
+# ── /search ────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["search"])
+def cmd_search(message):
+    if message.chat.type != "private":
+        return
+    if not check_user_access(message):
+        return
+    query = message.text.split(None, 1)[1].strip() if len(message.text.split(None, 1)) > 1 else ""
+    if not query:
+        bot.reply_to(message, "ব্যবহার: /search ‹keyword›"); return
+    react_ok(message.chat.id, message.message_id)
+    executor.submit(_do_search, message, query)
+
+
+def _do_search(message, query: str):
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    try:
+        bot.send_chat_action(message.chat.id, "typing")
+        answer = se.web_search_and_summarize(query, ai.generate_ai_response)
+        db.increment_daily_count(uid)
+        bot.reply_to(message, answer)
+        send_log(uid, uname,
+                 f"🔍 <b>Search</b>\n<b>Query:</b> {eh(query)}\n<b>Reply:</b> {eh(answer[:400])}")
+    except Exception as e:
+        log.error(f"Search handler error: {e}")
+        bot.reply_to(message, "🔍 Search করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+
+
+# ── /yt ────────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["yt"])
+def cmd_yt(message):
+    if message.chat.type != "private":
+        return
+    if not check_user_access(message):
+        return
+    query = message.text.split(None, 1)[1].strip() if len(message.text.split(None, 1)) > 1 else ""
+    if not query:
+        bot.reply_to(message, "ব্যবহার: /yt ‹keyword›"); return
+    react_ok(message.chat.id, message.message_id)
+    executor.submit(_do_yt, message, query)
+
+
+def _do_yt(message, query: str):
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    try:
+        bot.send_chat_action(message.chat.id, "typing")
+        videos = se.video_search(query, max_results=5)
+        if videos:
+            text = "🎬 <b>Video Results</b>\n\n"
+            for v in videos[:5]:
+                title = eh(v.get("title", "No Title")[:100])
+                url   = eh(v.get("content") or v.get("embed_url",""))
+                text += f"• <b>{title}</b>\n{url}\n\n"
+            bot.reply_to(message, text, parse_mode="HTML")
+        else:
+            bot.reply_to(message, "কোনো ভিডিও পাওয়া যায়নি।")
+        send_log(uid, uname, f"🎬 <b>YT Search</b>: {eh(query)}")
+    except Exception as e:
+        log.error(f"YT search error: {e}")
+        bot.reply_to(message, "Video search করতে সমস্যা হয়েছে।")
+
+
+# ── /image ─────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["image"])
+def cmd_image(message):
+    if message.chat.type != "private":
+        return
+    if not check_user_access(message):
+        return
+    query = message.text.split(None, 1)[1].strip() if len(message.text.split(None, 1)) > 1 else ""
+    if not query:
+        bot.reply_to(message, "ব্যবহার: /image ‹keyword›"); return
+    react_ok(message.chat.id, message.message_id)
+    executor.submit(_do_image, message, query)
+
+
+def _do_image(message, query: str):
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    try:
+        bot.send_chat_action(message.chat.id, "upload_photo")
+        results = se.image_search(query, max_results=10)
+        if not results:
+            bot.reply_to(message, f"🖼 '{eh(query)}' এর জন্য কোনো ছবি পাওয়া যায়নি।")
             return
-        return func(message)
-    return wrapper
+
+        sent = it.send_photo_safe(
+            bot, message.chat.id, results,
+            caption=f"🖼 {query}",
+            reply_to=message.message_id,
+        )
+        if not sent:
+            bot.reply_to(message, "🖼 ছবি পাঠাতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+            return
+
+        db.increment_daily_count(uid)
+        send_log(uid, uname, f"🖼 <b>Image Search</b>: {eh(query)}")
+    except Exception as e:
+        log.error(f"Image search error: {e}")
+        bot.reply_to(message, "🖼 Image search error। আবার চেষ্টা করুন।")
+
+
+# ── /enhance ───────────────────────────────────────────────────────────────────
+
+_enhance_pending: dict[int, bool] = {}
+_enhance_lock = threading.Lock()
+
+
+@bot.message_handler(commands=["enhance"])
+def cmd_enhance(message):
+    if message.chat.type != "private":
+        return
+    if not check_user_access(message):
+        return
+    uid = message.from_user.id
+    with _enhance_lock:
+        _enhance_pending[uid] = True
+    bot.reply_to(
+        message,
+        "✨ এখন একটি ছবি পাঠান — আমি তার মান উন্নত করব (sharpen, denoise, upscale)।"
+    )
+
+
+# ── /reload (admin) ────────────────────────────────────────────────────────────
 
 @bot.message_handler(commands=["reload"])
 @admin_only
 def cmd_reload(message):
-    """Reload all config files from disk without restarting the bot."""
-    global _configs
-    _configs = load_all_configs()
-    loaded = sum(1 for v in _configs.values() if v)
-    bot.reply_to(
-        message,
-        f"✅ Config reloaded! {loaded}/{len(_configs)} files loaded successfully.",
-    )
+    cfg    = ai.reload_configs()
+    loaded = sum(1 for v in cfg.values() if v)
+    bot.reply_to(message, f"✅ Config reloaded! {loaded}/{len(cfg)} files loaded.")
     log.info(f"Config reloaded by admin: {loaded} files")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ADMIN COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
 
 @bot.message_handler(commands=["ban"])
 @admin_only
 def cmd_ban(message):
     uid = resolve_target(message)
     if not uid:
-        bot.reply_to(message, "Usage: /ban ‹user_id›  or use from user topic"); return
-    set_user_field(uid, "is_banned", 1)
+        bot.reply_to(message, "Usage: /ban ‹user_id›  or run from user topic"); return
+    db.set_user_field(uid, "is_banned", 1)
     bot.reply_to(message, f"✅ User <code>{uid}</code> banned.", parse_mode="HTML")
+
 
 @bot.message_handler(commands=["unban"])
 @admin_only
@@ -776,8 +525,9 @@ def cmd_unban(message):
     uid = resolve_target(message)
     if not uid:
         bot.reply_to(message, "Usage: /unban ‹user_id›"); return
-    set_user_field(uid, "is_banned", 0)
+    db.set_user_field(uid, "is_banned", 0)
     bot.reply_to(message, f"✅ User <code>{uid}</code> unbanned.", parse_mode="HTML")
+
 
 @bot.message_handler(commands=["premium"])
 @admin_only
@@ -785,24 +535,28 @@ def cmd_premium(message):
     uid = resolve_target(message)
     if not uid:
         bot.reply_to(message, "Usage: /premium ‹user_id›"); return
-    set_user_field(uid, "is_premium", 1)
-    set_user_field(uid, "daily_limit", 500)
-    bot.reply_to(message, f"⭐ User <code>{uid}</code> is now Premium.", parse_mode="HTML")
+    db.set_user_field(uid, "is_premium", 1)
+    db.set_user_field(uid, "daily_limit", 500)
+    bot.reply_to(message, f"⭐ User <code>{uid}</code> is now Premium (500/day).",
+                 parse_mode="HTML")
+
 
 @bot.message_handler(commands=["limit"])
 @admin_only
 def cmd_limit(message):
     uid   = resolve_target(message)
     parts = message.text.split()
-    # /limit [user_id] <number>
     try:
         new_limit = int(parts[-1])
     except (ValueError, IndexError):
-        bot.reply_to(message, "Usage: /limit ‹user_id› ‹number›  e.g. /limit 12345 100"); return
+        bot.reply_to(message, "Usage: /limit ‹user_id› ‹number›"); return
     if not uid:
         bot.reply_to(message, "Usage: /limit ‹user_id› ‹number›"); return
-    set_user_field(uid, "daily_limit", new_limit)
-    bot.reply_to(message, f"✅ Limit for <code>{uid}</code> set to <b>{new_limit}</b>.", parse_mode="HTML")
+    db.set_user_field(uid, "daily_limit", new_limit)
+    bot.reply_to(message,
+                 f"✅ Limit for <code>{uid}</code> set to <b>{new_limit}</b>.",
+                 parse_mode="HTML")
+
 
 @bot.message_handler(commands=["add_info"])
 @admin_only
@@ -812,83 +566,252 @@ def cmd_add_info(message):
     info = text[2].strip() if len(text) >= 3 else (text[1].strip() if len(text) == 2 else "")
     if not uid or not info:
         bot.reply_to(message, "Usage: /add_info ‹user_id› ‹info text›"); return
-    set_user_field(uid, "custom_info", info)
+    db.set_user_field(uid, "custom_info", info)
     bot.reply_to(message, f"✅ Info set for <code>{uid}</code>.", parse_mode="HTML")
+
 
 @bot.message_handler(commands=["set_policy"])
 @admin_only
 def cmd_set_policy(message):
     uid  = resolve_target(message)
     text = message.text.split(None, 2)
-    policy = text[2].strip() if len(text) >= 3 else (text[1].strip() if len(text) == 2 else "")
-    if not uid or not policy:
+    pol  = text[2].strip() if len(text) >= 3 else (text[1].strip() if len(text) == 2 else "")
+    if not uid or not pol:
         bot.reply_to(message, "Usage: /set_policy ‹user_id› ‹policy text›"); return
-    set_user_field(uid, "policy", policy)
+    db.set_user_field(uid, "policy", pol)
     bot.reply_to(message, f"✅ Policy set for <code>{uid}</code>.", parse_mode="HTML")
 
-# ==================================================
-# 24H DATABASE BACKUP
-# ==================================================
 
-def _do_backup():
+@bot.message_handler(commands=["broadcast"])
+@admin_only
+def cmd_broadcast(message):
+    text = message.text.split(None, 1)
+    if len(text) < 2 or not text[1].strip():
+        bot.reply_to(message, "Usage: /broadcast ‹message text›"); return
+    bcast_text = text[1].strip()
+    executor.submit(_do_broadcast, message, bcast_text)
+
+
+def _do_broadcast(message, text: str):
+    all_ids  = db.get_all_user_ids()
+    sent = failed = 0
+    for uid in all_ids:
+        try:
+            bot.send_message(uid, text)
+            sent += 1
+            time.sleep(0.05)
+        except Exception:
+            failed += 1
+    bot.reply_to(message, f"📢 Broadcast done: ✅ {sent} sent, ❌ {failed} failed.")
+    log.info(f"Broadcast: {sent} sent, {failed} failed")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHOTO HANDLER — AI Vision + /enhance
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(content_types=["photo"])
+def handle_photo(message):
+    if message.chat.type != "private":
+        return
+
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+
+    # /enhance flow
+    with _enhance_lock:
+        pending_enhance = _enhance_pending.pop(uid, False)
+
+    if pending_enhance:
+        if not check_user_access(message):
+            return
+        react_ok(message.chat.id, message.message_id)
+        executor.submit(_do_enhance, message)
+        return
+
+    # AI Vision
+    if not check_user_access(message):
+        return
+    react_ok(message.chat.id, message.message_id)
+    executor.submit(_do_photo_analysis, message)
+
+
+def _do_enhance(message):
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    src   = None
+    out   = None
     try:
-        with open(DB_PATH, "rb") as f:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            bot.send_document(
-                LOG_GROUP_ID, f,
-                caption=f"📦 <b>Auto DB Backup</b> — {now}",
-                parse_mode="HTML"
+        bot.send_chat_action(message.chat.id, "upload_photo")
+        src = it.save_telegram_photo(bot, message.photo)
+        if not src:
+            bot.reply_to(message, "ছবি download করা যায়নি।"); return
+
+        out = it.enhance_image(src)
+        if not out:
+            bot.reply_to(message, "✨ Image enhancement এখন available নয়। Pillow চেক করুন।")
+            return
+
+        with open(out, "rb") as f:
+            bot.send_photo(
+                message.chat.id, f,
+                caption="✨ Enhanced image — sharpen + denoise + upscale applied.",
+                reply_to_message_id=message.message_id,
             )
-        log.info("DB backup sent successfully")
+        db.increment_daily_count(uid)
+        send_log(uid, uname, "✨ <b>Image Enhanced</b>")
     except Exception as e:
-        log.error(f"Backup failed: {e}")
+        log.error(f"Enhance error: {e}")
+        bot.reply_to(message, "✨ Enhancement failed। আবার চেষ্টা করুন।")
+    finally:
+        it.cleanup(src, out)
+
+
+def _do_photo_analysis(message):
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    src   = None
+    try:
+        bot.send_chat_action(message.chat.id, "typing")
+        src = it.save_telegram_photo(bot, message.photo)
+        if not src:
+            bot.reply_to(message, "ছবি process করা যায়নি।"); return
+
+        from PIL import Image
+        img     = Image.open(src)
+        caption = message.caption or "এই ছবিটি বিশ্লেষণ করো এবং বিস্তারিত বলো।"
+
+        user_data = db.get_user(uid) or {}
+        prompt    = ai.build_prompt(uid, caption, user_data)
+        reply     = ai.generate_ai_response(prompt, image=img)
+
+        ai.add_to_session(uid, "user",      caption)
+        ai.add_to_session(uid, "assistant", reply)
+        db.increment_daily_count(uid)
+
+        bot.reply_to(message, reply)
+        send_log_copy(uid, uname, message.chat.id, message.message_id)
+        send_log(uid, uname, f"🖼 <b>Vision Reply</b>\n{eh(reply[:400])}")
+    except Exception as e:
+        log.error(f"Photo analysis error: {e}")
+        bot.reply_to(message, "ছবিটি বিশ্লেষণ করা যায়নি। আবার চেষ্টা করুন।")
+    finally:
+        it.cleanup(src)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEXT HANDLER — AI Chat with auto-search
+# ══════════════════════════════════════════════════════════════════════════════
+
+@bot.message_handler(content_types=["text"])
+def handle_text(message):
+    if message.chat.type != "private":
+        return
+    if message.text.startswith("/"):
+        return
+    if not check_user_access(message):
+        return
+    react_ok(message.chat.id, message.message_id)
+    executor.submit(_do_ai_chat, message)
+
+
+def _do_ai_chat(message):
+    uid       = message.from_user.id
+    uname     = message.from_user.first_name or "User"
+    user_text = message.text
+
+    try:
+        bot.send_chat_action(message.chat.id, "typing")
+        user_data = db.get_user(uid) or {}
+
+        # Auto-detect real-time search need
+        search_ctx = None
+        if se.needs_realtime_search(user_text):
+            log.info(f"Auto-search triggered for: {user_text[:60]}")
+            search_ctx = _get_search_context(user_text)
+
+        prompt = ai.build_prompt(uid, user_text, user_data, search_context=search_ctx)
+        reply  = ai.generate_ai_response(prompt)
+
+        ai.add_to_session(uid, "user",      user_text)
+        ai.add_to_session(uid, "assistant", reply)
+        db.increment_daily_count(uid)
+
+        bot.reply_to(message, reply)
+
+        search_badge = "🌐" if search_ctx else "🤖"
+        send_log(uid, uname,
+                 f"{search_badge} <b>{'Search+AI' if search_ctx else 'AI Reply'}</b>\n"
+                 f"📩 {eh(user_text[:200])}\n\n"
+                 f"💬 {eh(reply[:400])}")
+
+    except Exception as e:
+        log.error(f"AI chat error: {e}")
+        bot.reply_to(message, "দুঃখিত, সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+
+
+def _get_search_context(query: str) -> str | None:
+    """Run DDG and return snippet block for prompt injection."""
+    if not se.DDG_AVAILABLE:
+        return None
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=8))
+        safe = [
+            r for r in results
+            if se.is_safe_result(r.get("title",""), r.get("body",""), r.get("href",""))
+        ]
+        if not safe:
+            return None
+        snippets = ""
+        for i, r in enumerate(safe[:6], 1):
+            title = r.get("title","")[:150]
+            body  = r.get("body","")[:300]
+            href  = r.get("href","")[:100]
+            snippets += f"{i}. [{title}]({href})\n   {body}\n\n"
+        return snippets
+    except Exception as e:
+        log.warning(f"Search context error: {e}")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 24H DATABASE BACKUP
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _backup_loop():
     while True:
-        time.sleep(86400)
-        _do_backup()
+        time.sleep(86_400)
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            with open(db.DB_PATH, "rb") as f:
+                bot.send_document(
+                    LOG_GROUP_ID, f,
+                    caption=f"📦 <b>Auto DB Backup</b> — {now}",
+                    parse_mode="HTML",
+                )
+            log.info("DB backup sent")
+        except Exception as e:
+            log.error(f"Backup failed: {e}")
 
-# 
 
+# ══════════════════════════════════════════════════════════════════════════════
 # STARTUP
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ==================================================
+if __name__ == "__main__" or True:
+    # Keep-alive Flask server
+    keep_alive.start()
 
-init_db()
+    # DB backup scheduler
+    threading.Thread(target=_backup_loop, daemon=True, name="db-backup").start()
+    log.info("DB backup scheduler started (24h interval)")
 
-backup_thread = threading.Thread(target=_backup_loop, daemon=True)
-backup_thread.start()
-log.info("Backup scheduler started (24h interval)")
+    log.info(f"Admin ID: {MY_ID}")
+    log.info(f"Log group: {LOG_GROUP_ID}")
+    log.info(f"DDG search: {'enabled' if se.DDG_AVAILABLE else 'DISABLED'}")
+    log.info(f"Image enhance: {'enabled (Pillow)' if it.PIL_AVAILABLE else 'DISABLED'}")
+    log.info("✅ Friday AI Bot starting (infinity_polling)...")
 
-log.info(f"Gemini keys loaded: {len(GEMINI_KEYS)}")
-log.info(f"DuckDuckGo search: {'enabled' if DDG_AVAILABLE else 'disabled'}")
-
-# =========================================
-# KEEP ALIVE SYSTEM
-# =========================================
-
-FLASK_PORT = int(os.environ.get("PORT", 5000))
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "✅ Friday AI Bot is alive!", 200
-
-@app.route('/health')
-def health():
-    return {"status": "ok", "bot": "running"}, 200
-
-def _run_flask():
-    import logging as _lg
-    _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
-    app.run(host="0.0.0.0", port=FLASK_PORT)
-
-flask_thread = Thread(target=_run_flask, daemon=True)
-flask_thread.start()
-log.info(f"Flask keep-alive running on port {FLASK_PORT}")
-
-log.info("✅ Bot starting...")
-
-bot.infinity_polling(timeout=30, long_polling_timeout=10)
-log.info("❌ Bot stopped")
+    bot.infinity_polling(timeout=30, long_polling_timeout=10)
