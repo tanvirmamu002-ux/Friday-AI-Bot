@@ -74,4 +74,4 @@ packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp
 GEMINI_KEY_1 = "AIzaSyD6ssOyp2xrQB_t5ZNFiWlNXSZnEzPBYFw"
 GEMINI_KEY_2 = "AIzaSyDBLHOjDV386-6aSx-NGtVvqEMVl9lxT0M"
 GEMINI_KEY_3 = "AIzaSyCmQwXL9sW6vX5ctkhhfT--9xJgnyS9a10"
-BOT_TOKEN = "8738670027:AAEo-Q4Kqpm-oaP5nmN0fWdXvx8ItJ8iF4w"
+BOT_TOKEN = "8738670027:AAGwgYMbYmlhZIqd01lEuB-n4AOM9rteWAw"

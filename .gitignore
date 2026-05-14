@@ -59,3 +59,7 @@ __pycache__/
 .venv/
 venv/
 .env
+.env
+bot_data.db
+__pycache__/
+*.pyc

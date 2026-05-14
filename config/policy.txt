@@ -2,8 +2,7 @@
 ## Owner: @hm_burhan | Edit this file and use /reload to apply
 
 # ─────────────────────────────────────────────
-# HARD BLOCKED — Cannot be overridden by anyone
-# ─────────────────────────────────────────────
+# HARD BLOCKED —  No One Except The Admin Can Cancel it.──────────────────
 HARD_BLOCK:
 - Murder methods or step-by-step killing instructions
 - Terrorism planning, incitement, or bomb-making
@@ -33,3 +32,4 @@ MENTAL_HEALTH_SUPPORT_ALLOWED=yes
 # "এই বিষয়ে আমি সাহায্য করতে পারব না।"
 # Do NOT explain WHY it is blocked.
 # Do NOT mention policy or owner.
+
