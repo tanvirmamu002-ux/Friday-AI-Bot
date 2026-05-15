@@ -21,6 +21,7 @@ import ai_logic as ai
 import search_engine as se
 import image_tools as it
 import keep_alive
+import formatter as fmt
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -876,7 +877,13 @@ def _do_photo_ai(message):
         ai.add_to_session(uid, "assistant", reply)
         db.increment_daily_count(uid)
 
-        bot.reply_to(message, reply)
+        # Send with HTML code formatting
+        formatted = fmt.format_telegram(reply)
+        chunks    = fmt.split_html_safe(formatted, max_len=4000)
+        bot.reply_to(message, chunks[0], parse_mode="HTML")
+        for chunk in chunks[1:]:
+            bot.send_message(message.chat.id, chunk, parse_mode="HTML")
+
         send_log_copy(uid, uname, message.chat.id, message.message_id)
         send_log(uid, uname, f"🖼 <b>Vision</b>\n{eh(reply[:400])}")
     except Exception as e:
@@ -926,25 +933,35 @@ def _stream_reply(chat_id: int, reply_to_id: int, prompt: str, image=None) -> st
             except Exception:
                 pass  # rate limit or no-change — skip this edit
 
-    # Final edit: remove cursor, show complete text
+    # Final edit: apply HTML code formatting, remove cursor
     final = full_text.strip()
     if not final:
         final = "দুঃখিত, কোনো উত্তর পাওয়া যায়নি।"
 
-    if final != last_sent:
+    formatted = fmt.format_telegram(final)
+    chunks    = fmt.split_html_safe(formatted, max_len=4000)
+
+    # First chunk replaces the streaming placeholder
+    try:
+        bot.edit_message_text(
+            chunks[0], chat_id, sent.message_id, parse_mode="HTML"
+        )
+    except Exception:
         try:
-            bot.edit_message_text(final, chat_id, sent.message_id)
+            bot.delete_message(chat_id, sent.message_id)
         except Exception:
-            # Message too long or other error — delete placeholder, send fresh
-            try:
-                bot.delete_message(chat_id, sent.message_id)
-            except Exception:
-                pass
-            for i in range(0, len(final), 4096):
-                bot.send_message(
-                    chat_id, final[i:i+4096],
-                    reply_to_message_id=(reply_to_id if i == 0 else None),
-                )
+            pass
+        bot.send_message(
+            chat_id, chunks[0], parse_mode="HTML",
+            reply_to_message_id=reply_to_id,
+        )
+
+    # Additional chunks (long responses)
+    for chunk in chunks[1:]:
+        try:
+            bot.send_message(chat_id, chunk, parse_mode="HTML")
+        except Exception as e:
+            log.warning(f"Extra chunk send failed: {e}")
 
     return final
 

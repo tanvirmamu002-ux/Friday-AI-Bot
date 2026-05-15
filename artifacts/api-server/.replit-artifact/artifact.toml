@@ -10,7 +10,7 @@ name = "Friday AI Bot"
 paths = ["/"]
 
 [services.development]
-run = "python main.py"
+run = "python /home/runner/workspace/main.py"
 
 [services.production]
 

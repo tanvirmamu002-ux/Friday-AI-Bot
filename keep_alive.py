@@ -38,3 +38,13 @@ def start(port: int | None = None):
     )
     t.start()
     log.info(f"Flask keep-alive started on port {port} (routes: / /health /ping)")
+
+
+if __name__ == "__main__":
+    # Standalone mode: run Flask in foreground (used by artifact dev workflow)
+    import logging as _lg
+    _lg.basicConfig(level=_lg.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
+    port = int(os.environ.get("PORT", 5000))
+    log.info(f"Keep-alive server starting on port {port}")
+    _flask_app.run(host="0.0.0.0", port=port)
