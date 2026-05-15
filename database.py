@@ -43,10 +43,11 @@ def init_db():
                 last_reset  TEXT    DEFAULT '',
                 topic_id    INTEGER,
                 custom_info TEXT    DEFAULT '',
-                policy      TEXT    DEFAULT ''
+                policy      TEXT    DEFAULT '',
+                custom_tone TEXT    DEFAULT ''
             );
         """)
-        # Migrate older DBs that used is_banned / is_premium columns
+        # Migrate older DBs — add missing columns
         existing = {
             row[1]
             for row in conn.execute("PRAGMA table_info(users)").fetchall()
@@ -62,6 +63,8 @@ def init_db():
             """)
         elif "role" not in existing:
             conn.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+        if "custom_tone" not in existing:
+            conn.execute("ALTER TABLE users ADD COLUMN custom_tone TEXT DEFAULT ''")
         conn.commit()
     log.info("Database ready")
 
@@ -83,14 +86,14 @@ def get_user(user_id: int) -> dict | None:
     with _db_lock, _conn() as conn:
         row = conn.execute(
             "SELECT user_id,user_name,role,daily_count,daily_limit,"
-            "last_reset,topic_id,custom_info,policy FROM users WHERE user_id=?",
+            "last_reset,topic_id,custom_info,policy,custom_tone FROM users WHERE user_id=?",
             (user_id,)
         ).fetchone()
     if not row:
         return None
     return dict(zip(
         ["user_id","user_name","role","daily_count","daily_limit",
-         "last_reset","topic_id","custom_info","policy"],
+         "last_reset","topic_id","custom_info","policy","custom_tone"],
         row
     ))
 
@@ -131,7 +134,7 @@ def get_user_by_topic(topic_id: int) -> int | None:
     return row[0] if row else None
 
 
-_ALLOWED_FIELDS = {"role", "daily_limit", "custom_info", "policy",
+_ALLOWED_FIELDS = {"role", "daily_limit", "custom_info", "policy", "custom_tone",
                    # legacy compat (old admin commands)
                    "is_banned", "is_premium"}
 

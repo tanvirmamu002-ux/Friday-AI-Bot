@@ -301,6 +301,34 @@ def _arg(message, n: int = 1) -> str:
     return parts[n].strip() if len(parts) > n else ""
 
 
+def _admin_target_and_text(message) -> tuple[int | None, str]:
+    """
+    Parse admin command from forum topic or explicit user_id.
+    Returns (target_uid, text_payload).
+    - In forum topic  : uid from topic,   entire text after command is payload
+    - Explicit user_id: uid from text[1], text[2:] is payload
+    """
+    tid = message.message_thread_id
+    raw_parts = message.text.split(None, 1)          # ["/cmd", "rest of text"]
+    rest = raw_parts[1].strip() if len(raw_parts) >= 2 else ""
+
+    if tid:
+        uid = db.get_user_by_topic(tid)
+        if uid:
+            return uid, rest
+
+    # Try to parse user_id as first token of rest
+    rest_parts = rest.split(None, 1)
+    if rest_parts:
+        try:
+            uid = int(rest_parts[0])
+            payload = rest_parts[1].strip() if len(rest_parts) >= 2 else ""
+            return uid, payload
+        except ValueError:
+            pass
+    return None, rest
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # COMMANDS — PUBLIC
 # ══════════════════════════════════════════════════════════════════════════════
@@ -387,16 +415,18 @@ def cmd_help(message):
     )
 
     admin_extra = (
-        "\n\n<b>👑 Admin Commands:</b>\n"
-        "  /ban [id]           — User ban\n"
-        "  /unban [id]         — User unban\n"
-        "  /premium [id]       — Premium grant\n"
-        "  /limit [id] ‹n›     — Daily limit set\n"
-        "  /add_info [id] ‹t›  — Custom info set\n"
-        "  /set_policy [id] ‹t› — Policy set\n"
-        "  /broadcast ‹text›   — Message all users\n"
-        "  /reload             — Reload config files\n"
-        "  /stats              — Bot statistics"
+        "\n\n<b>👑 Admin Commands (work in forum topic or with user_id):</b>\n"
+        "  /ban [id]              — Ban user\n"
+        "  /unban [id]            — Unban user\n"
+        "  /premium [id]          — Grant premium (500/day)\n"
+        "  /limit [id] ‹n›        — Set limit; no number = restore defaults\n"
+        "  /add_info ‹text›       — Add to GLOBAL knowledge base\n"
+        "  /set_user_info [id] ‹t›— Set personal memory for user\n"
+        "  /set_tone [id] ‹tone›  — Set per-user AI reply tone\n"
+        "  /set_policy [id] ‹t›   — Set per-user behavior policy\n"
+        "  /broadcast ‹text›      — Message all users\n"
+        "  /reload                — Reload config files\n"
+        "  /stats                 — Bot statistics"
     )
 
     text = public_help + (admin_extra if is_admin(uid) else "")
@@ -528,7 +558,11 @@ def _do_search(message, query: str):
         bot.send_chat_action(message.chat.id, "typing")
         answer = se.web_search_and_summarize(query, ai.generate_ai_response)
         db.increment_daily_count(uid)
-        bot.reply_to(message, answer)
+        formatted = fmt.format_telegram(answer)
+        chunks    = fmt.split_html_safe(formatted, max_len=4000)
+        bot.reply_to(message, chunks[0], parse_mode="HTML")
+        for chunk in chunks[1:]:
+            bot.send_message(message.chat.id, chunk, parse_mode="HTML")
         send_log(uid, uname, f"🔍 <b>Search</b>\n{eh(query)}\n\n💬 {eh(answer[:300])}")
     except Exception as e:
         log.error(f"Search error: {e}")
@@ -714,58 +748,101 @@ def cmd_premium(message):
 @admin_only
 def cmd_limit(message):
     uid = resolve_target(message)
+    if not uid:
+        bot.reply_to(message, "Usage: /limit ‹user_id› ‹number›  — or run in topic")
+        return
     parts = message.text.split()
+    # If a number is provided → set that specific limit
     try:
         new_limit = int(parts[-1])
         if new_limit < 0:
             raise ValueError
-    except (ValueError, IndexError):
+        db.set_user_field(uid, "daily_limit", new_limit)
         bot.reply_to(
-            message, "Usage: /limit ‹user_id› ‹number›\nExample: /limit 12345 200"
+            message,
+            f"✅ Daily limit for <code>{uid}</code> set to <b>{new_limit}</b>.",
+            parse_mode="HTML",
         )
-        return
-    if not uid:
-        bot.reply_to(message, "Usage: /limit ‹user_id› ‹number›")
-        return
-    db.set_user_field(uid, "daily_limit", new_limit)
-    bot.reply_to(
-        message,
-        f"✅ Daily limit for <code>{uid}</code> set to <b>{new_limit}</b>.",
-        parse_mode="HTML",
-    )
+    except (ValueError, IndexError):
+        # No number → restore to normal free user defaults (remove premium)
+        db.set_user_field(uid, "is_premium", 0)  # sets role=user, limit=50
+        bot.reply_to(
+            message,
+            f"✅ User <code>{uid}</code> restored to normal limits (50/day, free plan).",
+            parse_mode="HTML",
+        )
+        log.info(f"Admin restored defaults for {uid}")
 
 
 @bot.message_handler(commands=["add_info"])
 @admin_only
 def cmd_add_info(message):
-    uid = resolve_target(message)
-    text = message.text.split(None, 2)
-    info = (
-        text[2].strip()
-        if len(text) >= 3
-        else (text[1].strip() if len(text) == 2 else "")
-    )
+    """Add text to GLOBAL knowledge_base.txt (appends, no user_id needed)."""
+    parts = message.text.split(None, 1)
+    info = parts[1].strip() if len(parts) >= 2 else ""
+    if not info:
+        bot.reply_to(message, "Usage: /add_info ‹text to add globally›")
+        return
+    kb_path = ai.CONFIG_DIR / "knowledge_base.txt"
+    try:
+        existing = kb_path.read_text(encoding="utf-8") if kb_path.exists() else ""
+        separator = "\n\n" if existing.strip() else ""
+        kb_path.write_text(existing + separator + info, encoding="utf-8")
+        ai.reload_configs()
+        bot.reply_to(
+            message, "✅ Global knowledge base updated and reloaded.", parse_mode="HTML"
+        )
+        log.info(f"Admin appended to knowledge_base.txt: {info[:60]}")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error updating knowledge base: {e}")
+
+
+@bot.message_handler(commands=["set_user_info"])
+@admin_only
+def cmd_set_user_info(message):
+    """Set personal memory/behavior for a specific user (stored in DB)."""
+    uid, info = _admin_target_and_text(message)
     if not uid or not info:
-        bot.reply_to(message, "Usage: /add_info ‹user_id› ‹info text›")
+        bot.reply_to(
+            message,
+            "Usage: /set_user_info ‹user_id› ‹info text›  — or run in topic",
+        )
         return
     db.set_user_field(uid, "custom_info", info)
     bot.reply_to(
-        message, f"✅ Custom info set for <code>{uid}</code>.", parse_mode="HTML"
+        message,
+        f"✅ Personal info set for <code>{uid}</code>.",
+        parse_mode="HTML",
     )
+
+
+@bot.message_handler(commands=["set_tone"])
+@admin_only
+def cmd_set_tone(message):
+    """Set per-user AI reply tone (overrides global reply_tone.txt)."""
+    uid, tone = _admin_target_and_text(message)
+    if not uid or not tone:
+        bot.reply_to(
+            message,
+            "Usage: /set_tone ‹user_id› ‹tone description›  — or run in topic\n"
+            "Example: /set_tone 12345 Reply in formal English only, no emojis.",
+        )
+        return
+    db.set_user_field(uid, "custom_tone", tone)
+    bot.reply_to(
+        message,
+        f"✅ Tone set for <code>{uid}</code>:\n<i>{eh(tone)}</i>",
+        parse_mode="HTML",
+    )
+    log.info(f"Admin set custom_tone for {uid}: {tone[:60]}")
 
 
 @bot.message_handler(commands=["set_policy"])
 @admin_only
 def cmd_set_policy(message):
-    uid = resolve_target(message)
-    text = message.text.split(None, 2)
-    pol = (
-        text[2].strip()
-        if len(text) >= 3
-        else (text[1].strip() if len(text) == 2 else "")
-    )
+    uid, pol = _admin_target_and_text(message)
     if not uid or not pol:
-        bot.reply_to(message, "Usage: /set_policy ‹user_id› ‹policy text›")
+        bot.reply_to(message, "Usage: /set_policy ‹user_id› ‹policy text›  — or run in topic")
         return
     db.set_user_field(uid, "policy", pol)
     bot.reply_to(message, f"✅ Policy set for <code>{uid}</code>.", parse_mode="HTML")
@@ -891,6 +968,50 @@ def _do_photo_ai(message):
         bot.reply_to(message, "ছবিটি বিশ্লেষণ করা যায়নি। আবার চেষ্টা করুন।")
     finally:
         it.cleanup(src)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MEDIA FORWARDING — video, document, voice, audio, sticker
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _forward_media_to_topic(message, media_type: str):
+    """Forward any media message to the user's forum topic."""
+    if message.chat.type != "private":
+        return
+    uid   = message.from_user.id
+    uname = message.from_user.first_name or "User"
+    db.upsert_user(uid, uname)
+    try:
+        send_log_copy(uid, uname, message.chat.id, message.message_id)
+        log.info(f"Forwarded {media_type} from {uid} to topic")
+    except Exception as e:
+        log.warning(f"Media forward error ({media_type}): {e}")
+
+
+@bot.message_handler(content_types=["video"])
+def handle_video(message):
+    executor.submit(_forward_media_to_topic, message, "video")
+
+
+@bot.message_handler(content_types=["document"])
+def handle_document(message):
+    executor.submit(_forward_media_to_topic, message, "document")
+
+
+@bot.message_handler(content_types=["voice"])
+def handle_voice(message):
+    executor.submit(_forward_media_to_topic, message, "voice")
+
+
+@bot.message_handler(content_types=["audio"])
+def handle_audio(message):
+    executor.submit(_forward_media_to_topic, message, "audio")
+
+
+@bot.message_handler(content_types=["sticker"])
+def handle_sticker(message):
+    executor.submit(_forward_media_to_topic, message, "sticker")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

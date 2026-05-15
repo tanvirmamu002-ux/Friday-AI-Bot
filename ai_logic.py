@@ -183,6 +183,37 @@ def session_length(user_id: int) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# RAG — CHUNK-BASED SELECTIVE KNOWLEDGE LOADING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get_relevant_knowledge(query: str, knowledge: str, max_chunks: int = 4) -> str:
+    """
+    Load only relevant chunks of knowledge_base.txt instead of the full file.
+    Splits on double-newlines (paragraphs/sections), scores by keyword overlap,
+    returns the top-N most relevant. Falls back to full text if small enough.
+    """
+    if not knowledge:
+        return ""
+    paragraphs = [p.strip() for p in knowledge.split("\n\n") if p.strip()]
+    if len(paragraphs) <= max_chunks:
+        return knowledge  # small enough — use whole file
+
+    query_words = set(re.findall(r"\w+", query.lower()))
+    scored = []
+    for para in paragraphs:
+        para_words = set(re.findall(r"\w+", para.lower()))
+        score = len(query_words & para_words)
+        scored.append((score, para))
+
+    scored.sort(key=lambda x: -x[0])
+    # Always include top-scoring, skip zero-overlap ones (irrelevant sections)
+    relevant = [p for s, p in scored[:max_chunks] if s > 0]
+    if not relevant:
+        relevant = [scored[0][1]]  # always return at least the best match
+    return "\n\n".join(relevant)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PROMPT BUILDER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -254,13 +285,18 @@ def build_prompt(
     if cfg.get("forbidden_topics"):
         sections.append(cfg["forbidden_topics"])
 
-    # ── 6. Reply tone ─────────────────────────────────────────────────────────
-    if cfg.get("reply_tone"):
+    # ── 6. Reply tone (per-user override takes priority) ──────────────────────
+    custom_tone = (user_data or {}).get("custom_tone", "").strip()
+    if custom_tone:
+        sections.append(f"Reply tone for this user (override):\n{custom_tone}")
+    elif cfg.get("reply_tone"):
         sections.append(cfg["reply_tone"])
 
-    # ── 7. Knowledge base ─────────────────────────────────────────────────────
+    # ── 7. Knowledge base — chunk-based, load only relevant sections ──────────
     if cfg.get("knowledge_base"):
-        sections.append(cfg["knowledge_base"])
+        relevant_kb = _get_relevant_knowledge(new_message, cfg["knowledge_base"])
+        if relevant_kb:
+            sections.append(relevant_kb)
 
     # ── 8. Hidden user context (never surfaced to user) ───────────────────────
     msg_count = session_length(user_id)
