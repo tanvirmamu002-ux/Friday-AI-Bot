@@ -887,7 +887,70 @@ def _do_photo_ai(message):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TEXT HANDLER — AI Chat with auto-search
+# STREAMING HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+_EDIT_INTERVAL = 0.9   # seconds between Telegram message edits
+_MIN_CHARS     = 20    # don't edit until at least this many chars accumulated
+
+
+def _stream_reply(chat_id: int, reply_to_id: int, prompt: str, image=None) -> str:
+    """
+    Stream Gemini response → edit Telegram message live as text arrives.
+    Returns the complete text when done.
+    """
+    # Send placeholder message immediately so user sees something
+    try:
+        sent = bot.send_message(chat_id, "✍️", reply_to_message_id=reply_to_id)
+    except Exception as e:
+        log.warning(f"Placeholder send failed: {e}")
+        return ai.generate_ai_response(prompt, image)  # fallback to normal
+
+    full_text  = ""
+    last_edit  = 0.0
+    last_sent  = ""   # track what's currently shown to avoid no-change edits
+
+    for chunk in ai.stream_ai_response(prompt, image):
+        full_text += chunk
+        now = time.time()
+
+        # Edit every _EDIT_INTERVAL seconds, only if content changed meaningfully
+        if (now - last_edit >= _EDIT_INTERVAL
+                and len(full_text) >= _MIN_CHARS
+                and full_text != last_sent):
+            try:
+                display = full_text + "▌"   # typing cursor
+                bot.edit_message_text(display, chat_id, sent.message_id)
+                last_sent = full_text
+                last_edit = now
+            except Exception:
+                pass  # rate limit or no-change — skip this edit
+
+    # Final edit: remove cursor, show complete text
+    final = full_text.strip()
+    if not final:
+        final = "দুঃখিত, কোনো উত্তর পাওয়া যায়নি।"
+
+    if final != last_sent:
+        try:
+            bot.edit_message_text(final, chat_id, sent.message_id)
+        except Exception:
+            # Message too long or other error — delete placeholder, send fresh
+            try:
+                bot.delete_message(chat_id, sent.message_id)
+            except Exception:
+                pass
+            for i in range(0, len(final), 4096):
+                bot.send_message(
+                    chat_id, final[i:i+4096],
+                    reply_to_message_id=(reply_to_id if i == 0 else None),
+                )
+
+    return final
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEXT HANDLER — AI Chat with auto-search + streaming
 # ══════════════════════════════════════════════════════════════════════════════
 
 
@@ -904,15 +967,15 @@ def handle_text(message):
 
 
 def _do_ai_chat(message):
-    uid = message.from_user.id
-    uname = message.from_user.first_name or "User"
+    uid       = message.from_user.id
+    uname     = message.from_user.first_name or "User"
     user_text = message.text
 
     try:
         bot.send_chat_action(message.chat.id, "typing")
         db.upsert_user(uid, uname)
         user_data = db.get_user(uid) or {}
-        role = _user_role(user_data, uid)
+        role      = _user_role(user_data, uid)
 
         # Auto-detect real-time search need
         search_ctx = None
@@ -921,29 +984,28 @@ def _do_ai_chat(message):
             search_ctx = _get_search_context(user_text)
 
         prompt = ai.build_prompt(
-            uid,
-            user_text,
-            user_data,
-            user_name=uname,
-            user_role=role,
+            uid, user_text, user_data,
+            user_name=uname, user_role=role,
             search_context=search_ctx,
         )
-        reply = ai.generate_ai_response(prompt)
 
-        ai.add_to_session(uid, "user", user_text)
+        # Streaming reply — user sees text as it's generated
+        reply = _stream_reply(message.chat.id, message.message_id, prompt)
+
+        ai.add_to_session(uid, "user",      user_text)
         ai.add_to_session(uid, "assistant", reply)
         db.increment_daily_count(uid)
 
-        bot.reply_to(message, reply)
-
         badge = "🌐 Search+AI" if search_ctx else "🤖 AI"
-        send_log(
-            uid, uname, f"{badge}\n📩 {eh(user_text[:200])}\n\n💬 {eh(reply[:300])}"
-        )
+        send_log(uid, uname,
+                 f"{badge}\n📩 {eh(user_text[:200])}\n\n💬 {eh(reply[:300])}")
 
     except Exception as e:
         log.error(f"AI chat error: {e}")
-        bot.reply_to(message, "দুঃখিত, সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        try:
+            bot.reply_to(message, "দুঃখিত, সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════

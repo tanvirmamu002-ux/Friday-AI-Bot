@@ -56,6 +56,39 @@ def generate_ai_response(prompt: str, image=None) -> str:
     return "দুঃখিত, AI সার্ভিস এখন unavailable। একটু পরে চেষ্টা করুন।"
 
 
+def stream_ai_response(prompt: str, image=None):
+    """
+    Generator — yields text chunks from Gemini streaming API.
+    Falls back to non-streaming on error.
+    Usage: for chunk in stream_ai_response(prompt): ...
+    """
+    global _key_index
+    total = len(_gemini_keys)
+    if not total:
+        yield "Gemini keys not configured."
+        return
+
+    for attempt in range(total):
+        with _key_lock:
+            idx     = _key_index
+            api_key = _gemini_keys[idx]
+        try:
+            client   = genai.Client(api_key=api_key)
+            contents = [prompt, image] if image else prompt
+            for chunk in client.models.generate_content_stream(
+                model=MODEL_NAME, contents=contents
+            ):
+                if chunk.text:
+                    yield chunk.text
+            return  # success — stop key rotation
+        except Exception as e:
+            log.warning(f"Gemini stream key {idx+1} failed (attempt {attempt+1}): {e}")
+            with _key_lock:
+                _key_index = (_key_index + 1) % total
+
+    yield "দুঃখিত, AI সার্ভিস এখন unavailable। একটু পরে চেষ্টা করুন।"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG FILE LOADER
 # ══════════════════════════════════════════════════════════════════════════════
