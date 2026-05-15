@@ -78,19 +78,17 @@ def eh(text: str) -> str:
 
 
 def is_admin(user_id: int) -> bool:
-    return user_id == MY_ID
+    # SECURITY: only trusts real Telegram user_id, never username or message text
+    return db.is_owner(user_id, MY_ID)
 
 
 def _user_role(user_data: dict | None, user_id: int) -> str:
     if is_admin(user_id):
-        return "admin"
+        return "owner"
     if not user_data:
         return "user"
-    if user_data.get("is_banned"):
-        return "banned"
-    if user_data.get("is_premium"):
-        return "premium"
-    return "user"
+    # Read role from DB — set by admin commands, never from user input
+    return user_data.get("role", db.ROLE_USER)
 
 
 # ── Rate limiter ───────────────────────────────────────────────────────────────
@@ -100,7 +98,7 @@ _rate_lock = threading.Lock()
 
 
 def is_rate_limited(user_id: int) -> bool:
-    if is_admin(user_id):
+    if db.is_owner(user_id, MY_ID):
         return False
     now = time.time()
     with _rate_lock:
@@ -117,31 +115,35 @@ def is_rate_limited(user_id: int) -> bool:
 
 
 def check_user_access(message) -> bool:
+    # SECURITY: uid always from message.from_user.id — Telegram-verified, never from text
     uid = message.from_user.id
     uname = message.from_user.first_name or "User"
 
-    if is_admin(uid):
+    # Owner: unlimited
+    if db.is_owner(uid, MY_ID):
         return True
 
     db.upsert_user(uid, uname)
     db.reset_daily_if_needed(uid)
-    user = db.get_user(uid)
 
-    if user and user["is_banned"]:
+    # Ban check (role stored in DB, set only by admin commands)
+    if db.is_banned(uid):
         bot.reply_to(message, "🚫 আপনি banned আছেন।")
         return False
 
+    # Rate limit (burst protection)
     if is_rate_limited(uid):
-        bot.reply_to(
-            message,
-            f"⏳ প্রতি মিনিটে সর্বোচ্চ {MAX_REQ_PER_MIN}টি request। একটু অপেক্ষা করুন।",
-        )
+        bot.reply_to(message,
+            f"⏳ প্রতি মিনিটে সর্বোচ্চ {MAX_REQ_PER_MIN}টি request। একটু অপেক্ষা করুন।")
         return False
 
-    # Daily limit tracking only — enforcement disabled (uncomment to enable):
-    # if user and user["daily_count"] >= user["daily_limit"]:
-    #     bot.reply_to(message, f"📊 আজকের limit শেষ।")
-    #     return False
+    # Daily limit enforcement
+    if db.at_daily_limit(uid):
+        user = db.get_user(uid)
+        lim  = user["daily_limit"] if user else 50
+        bot.reply_to(message,
+            f"📊 আজকের {lim}টি request limit শেষ। কাল আবার চেষ্টা করুন।")
+        return False
 
     return True
 
@@ -231,29 +233,29 @@ def send_log_copy(user_id: int, user_name: str, chat_id: int, message_id: int):
 
 
 def _get_search_context(query: str) -> str | None:
+    """Fetch DDG results, sanitize against injection, return snippet block."""
     if not se.DDG_AVAILABLE:
         return None
     try:
         from duckduckgo_search import DDGS
-
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=8))
-        safe = [
-            r
-            for r in results
-            if se.is_safe_result(
-                r.get("title", ""), r.get("body", ""), r.get("href", "")
-            )
-        ]
+            results = list(ddgs.text(query, max_results=10))
+        safe = []
+        for r in results:
+            title = r.get("title", "")[:200]
+            body  = r.get("body",  "")[:400]
+            href  = r.get("href",  "")[:120]
+            if not se.is_safe_result(title, body, href):
+                continue
+            clean = se.sanitize_snippet(body)
+            if clean:
+                safe.append({"title": title, "body": clean, "href": href})
         if not safe:
             return None
         snippets = ""
         for i, r in enumerate(safe[:6], 1):
-            title = r.get("title", "")[:150]
-            body = r.get("body", "")[:300]
-            href = r.get("href", "")[:100]
-            snippets += f"{i}. [{title}]({href})\n   {body}\n\n"
-        log.info(f"Search context: {len(safe)} results for '{query[:50]}'")
+            snippets += f"{i}. {r['title']}\n   {r['body']}\n   {r['href']}\n\n"
+        log.info(f"Search context: {len(safe)} safe results for '{query[:50]}'")
         return snippets
     except Exception as e:
         log.warning(f"Search context error: {e}")
@@ -270,7 +272,8 @@ def admin_only(func):
 
     @functools.wraps(func)
     def wrapper(message):
-        if not is_admin(message.from_user.id):
+        # SECURITY: check real Telegram user_id only
+        if not db.is_owner(message.from_user.id, MY_ID):
             return
         return func(message)
 
@@ -300,6 +303,24 @@ def _arg(message, n: int = 1) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 # COMMANDS — PUBLIC
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── /id ────────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=["id"])
+def cmd_id(message):
+    """Return the real Telegram user_id of the sender. Works in any chat."""
+    uid   = message.from_user.id   # always from Telegram, never from text
+    uname = message.from_user.first_name or "User"
+    role  = db.get_user_role(uid)
+    if db.is_owner(uid, MY_ID):
+        role = "owner"
+    bot.reply_to(message,
+        f"🆔 <b>Your Telegram ID</b>\n\n"
+        f"ID  : <code>{uid}</code>\n"
+        f"Name: {eh(uname)}\n"
+        f"Role: {role}",
+        parse_mode="HTML")
+
 
 # ── /start ─────────────────────────────────────────────────────────────────────
 
@@ -410,10 +431,11 @@ def cmd_status(message):
         bot.reply_to(message, "তথ্য পাওয়া যায়নি।")
         return
 
-    remaining = max(20, user["daily_limit"] - user["daily_count"])
-    premium_badge = "⭐ Premium" if user["is_premium"] else "🆓 Free"
-    banned_badge = "🚫 Banned" if user["is_banned"] else "✅ Active"
-    session_msgs = ai.session_length(uid)
+    remaining     = max(0, user["daily_limit"] - user["daily_count"])
+    role          = user.get("role", "user")
+    premium_badge = "⭐ Premium" if role == db.ROLE_PREMIUM else "🆓 Free"
+    banned_badge  = "🚫 Banned"  if role == db.ROLE_BANNED  else "✅ Active"
+    session_msgs  = ai.session_length(uid)
 
     text = (
         f"📊 <b>Account Status</b>\n\n"
@@ -962,4 +984,3 @@ log.info("✅ Friday AI Bot starting...")
 
 bot.infinity_polling(timeout=30, long_polling_timeout=10)
 
-run = "python main.py"

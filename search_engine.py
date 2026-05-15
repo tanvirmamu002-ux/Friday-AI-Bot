@@ -1,5 +1,9 @@
-import logging
+"""
+search_engine.py — DuckDuckGo search, auto-detection, sanitization
+"""
+
 import re
+import logging
 
 log = logging.getLogger(__name__)
 
@@ -10,32 +14,48 @@ except ImportError:
     DDG_AVAILABLE = False
     log.warning("duckduckgo_search not installed — search disabled")
 
-# ---------- NSFW / malicious filter ----------
 
-NSFW_WORDS = {
-    "porn","xxx","nude","naked","sex video","adult content",
-    "hentai","onlyfans","escort","hack","crack","warez",
-    "torrent piracy","malware","exploit","ransomware","phishing",
-}
+# ── NSFW / unsafe keyword filter ──────────────────────────────────────────────
+
+_NSFW_WORDS = frozenset({
+    "porn", "xxx", "nude", "naked", "sex video", "adult content",
+    "hentai", "onlyfans", "escort", "hack tutorial", "crack software",
+    "warez", "malware", "exploit kit", "ransomware", "phishing kit",
+})
 
 def is_safe_result(title: str, snippet: str, url: str) -> bool:
     combined = f"{title} {snippet} {url}".lower()
-    return not any(w in combined for w in NSFW_WORDS)
+    return not any(w in combined for w in _NSFW_WORDS)
 
 
-# ---------- Auto-detect real-time search need ----------
+# ── Prompt-injection sanitizer ────────────────────────────────────────────────
+
+# Patterns that could hijack the Gemini prompt if present in search snippets
+_INJECTION_RE = re.compile(
+    r"(ignore (all |previous |prior )?instructions?|"
+    r"system prompt|you are now|act as (a |an )?|"
+    r"forget (everything|all)|new (role|persona|instructions?)|"
+    r"===|---\s*(system|user|assistant)|"
+    r"\[INST\]|\[/INST\]|<\|im_start\|>|<\|im_end\|>)",
+    re.IGNORECASE,
+)
+
+def sanitize_snippet(text: str) -> str:
+    """Strip potential prompt-injection patterns from a search snippet."""
+    lines = text.splitlines()
+    clean = [ln for ln in lines if not _INJECTION_RE.search(ln)]
+    return " ".join(clean).strip()
+
+
+# ── Auto-detect real-time search need ─────────────────────────────────────────
 
 _REALTIME_PATTERNS = [
-    # Bengali time/current markers
     r"আজক[ের]+", r"এখন", r"বর্তমান", r"সর্বশেষ", r"তাজা",
     r"চলতি", r"হালনাগাদ", r"ব্রেকিং", r"নতুন খবর",
-    # English time markers
     r"\btoday\b", r"\bnow\b", r"\bcurrent(ly)?\b", r"\blatest\b",
     r"\brecent(ly)?\b", r"\blive\b", r"\bbreaking\b", r"\bjust now\b",
     r"\bthis (week|month|year)\b", r"\bright now\b",
-    # Year numbers 2024+
     r"\b202[4-9]\b", r"\b203\d\b",
-    # Topic keywords
     r"\bnews\b", r"খবর", r"সংবাদ",
     r"weather|আবহাওয়া|তাপমাত্রা|বৃষ্টি",
     r"price|দাম|রেট|মূল্য",
@@ -51,59 +71,61 @@ _REALTIME_PATTERNS = [
 ]
 _REALTIME_RE = re.compile("|".join(_REALTIME_PATTERNS), re.IGNORECASE)
 
+
 def needs_realtime_search(text: str) -> bool:
-    """Return True if the query likely needs live web data."""
     return bool(_REALTIME_RE.search(text))
 
 
-# ---------- Core search + summarise ----------
+# ── Core search + summarise ───────────────────────────────────────────────────
 
 def web_search_and_summarize(query: str, generate_fn) -> str:
     """
-    DuckDuckGo text search → feed results to Gemini for summarisation.
-    generate_fn(prompt) must return a string AI response.
+    DuckDuckGo → sanitize results → Gemini summarise.
+    Falls back to Gemini memory if DDG fails.
     """
     if not DDG_AVAILABLE:
-        log.warning("DDG unavailable, falling back to AI memory")
+        log.warning("DDG unavailable, using Gemini memory")
         return generate_fn(query)
 
-    raw_results = []
+    raw = []
     try:
         with DDGS() as ddgs:
-            raw_results = list(ddgs.text(query, max_results=8))
-        log.info(f"DDG search '{query[:50]}' → {len(raw_results)} results")
+            raw = list(ddgs.text(query, max_results=10))
+        log.info(f"DDG '{query[:50]}' → {len(raw)} results")
     except Exception as e:
-        log.warning(f"DuckDuckGo search failed: {e}")
+        log.warning(f"DDG failed: {e}")
         return generate_fn(query)
 
-    safe = [
-        r for r in raw_results
-        if is_safe_result(r.get("title",""), r.get("body",""), r.get("href",""))
-    ]
+    # Filter unsafe + sanitize injection patterns
+    safe = []
+    for r in raw:
+        title   = r.get("title", "")[:200]
+        body    = r.get("body",  "")[:400]
+        href    = r.get("href",  "")[:120]
+        if not is_safe_result(title, body, href):
+            continue
+        clean_body = sanitize_snippet(body)
+        if clean_body:
+            safe.append({"title": title, "body": clean_body, "href": href})
 
     if not safe:
-        log.info("No safe DDG results; falling back to AI memory")
+        log.info("No safe DDG results — falling back to Gemini memory")
         return generate_fn(query)
 
     snippets = ""
     for i, r in enumerate(safe[:6], 1):
-        title = r.get("title","")[:150]
-        body  = r.get("body", "")[:300]
-        href  = r.get("href","")[:100]
-        snippets += f"{i}. [{title}]({href})\n   {body}\n\n"
+        snippets += f"{i}. {r['title']}\n   {r['body']}\n   {r['href']}\n\n"
 
     prompt = (
         "তুমি একটি AI assistant। নিচের real-time web search results ব্যবহার করে "
-        "প্রশ্নের উত্তর দাও। পুরনো Gemini memory নয়, এই fresh results থেকে উত্তর দাও। "
-        "NSFW বা ক্ষতিকর তথ্য বাদ দাও। সংক্ষিপ্ত, নির্ভুল ও তথ্যপূর্ণ উত্তর দাও।\n\n"
-        f"=== WEB SEARCH RESULTS (real-time) ===\n{snippets}\n"
-        f"=== QUESTION ===\n{query}"
+        "প্রশ্নের সংক্ষিপ্ত ও নির্ভুল উত্তর দাও। পুরনো memory নয়, এই fresh data ব্যবহার করো।\n\n"
+        f"Search Results:\n{snippets}\n"
+        f"Question: {query}"
     )
     return generate_fn(prompt)
 
 
-def image_search(query: str, max_results: int = 10) -> list[dict]:
-    """Return list of safe image results [{title, image, url}]."""
+def image_search(query: str, max_results: int = 12) -> list[dict]:
     if not DDG_AVAILABLE:
         return []
     try:
@@ -119,7 +141,6 @@ def image_search(query: str, max_results: int = 10) -> list[dict]:
 
 
 def video_search(query: str, max_results: int = 5) -> list[dict]:
-    """Return list of video results."""
     if not DDG_AVAILABLE:
         return []
     try:
