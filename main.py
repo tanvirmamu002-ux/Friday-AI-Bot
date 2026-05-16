@@ -169,6 +169,18 @@ _topic_lock = threading.Lock()
 TG_MAX_LEN = 4096
 
 
+def _is_thread_gone(err: Exception) -> bool:
+    """True if the error means the forum topic no longer exists in Telegram."""
+    msg = str(err).lower()
+    return (
+        "message thread not found" in msg
+        or "topic_deleted" in msg
+        or "topic_closed" in msg
+        or "chat not found" in msg
+        or ("bad request" in msg and "thread" in msg)
+    )
+
+
 def _send_chunks(
     chat_id: int, text: str, thread_id: int | None, parse_mode: str = "HTML"
 ):
@@ -182,16 +194,20 @@ def _send_chunks(
             else:
                 bot.send_message(chat_id, chunk, parse_mode=parse_mode)
         except Exception as e:
+            if _is_thread_gone(e):
+                raise  # propagate so caller can recreate topic
             log.warning(f"Chunk send failed: {e}")
 
 
 def get_or_create_topic(user_id: int, user_name: str) -> int | None:
+    """Return existing topic_id or create a new forum topic. 0/None = no topic."""
     user = db.get_user(user_id)
-    if user and user["topic_id"]:
+    if user and user.get("topic_id"):   # 0 treated as "no topic" → recreate
         return user["topic_id"]
     with _topic_lock:
+        # Re-check inside lock to avoid double-creation
         user = db.get_user(user_id)
-        if user and user["topic_id"]:
+        if user and user.get("topic_id"):
             return user["topic_id"]
         try:
             topic = bot.create_forum_topic(LOG_GROUP_ID, f"👤 {user_name} | {user_id}")
@@ -205,27 +221,50 @@ def get_or_create_topic(user_id: int, user_name: str) -> int | None:
 
 
 def send_log(user_id: int, user_name: str, text: str):
+    """Send log text to user's forum topic, auto-recreating if topic was deleted."""
     try:
         tid = get_or_create_topic(user_id, user_name)
-        if tid:
-            _send_chunks(LOG_GROUP_ID, text, tid)
-        else:
+        if not tid:
             _send_chunks(
                 LOG_GROUP_ID, f"<b>👤 {eh(user_name)} ({user_id})</b>\n\n{text}", None
             )
+            return
+        try:
+            _send_chunks(LOG_GROUP_ID, text, tid)
+        except Exception as e:
+            if _is_thread_gone(e):
+                log.warning(f"Topic {tid} gone for user {user_id} — auto-recreating")
+                db.set_topic_id(user_id, 0)   # reset so get_or_create makes a new one
+                new_tid = get_or_create_topic(user_id, user_name)
+                if new_tid:
+                    _send_chunks(LOG_GROUP_ID, text, new_tid)
+            else:
+                log.warning(f"send_log chunk error: {e}")
     except Exception as e:
         log.warning(f"send_log error: {e}")
 
 
 def send_log_copy(user_id: int, user_name: str, chat_id: int, message_id: int):
+    """Forward a user message to their forum topic, auto-recreating if needed."""
     try:
         tid = get_or_create_topic(user_id, user_name)
-        if tid:
-            bot.forward_message(
-                LOG_GROUP_ID, chat_id, message_id, message_thread_id=tid
-            )
+        if not tid:
+            return
+        try:
+            bot.forward_message(LOG_GROUP_ID, chat_id, message_id, message_thread_id=tid)
+        except Exception as e:
+            if _is_thread_gone(e):
+                log.warning(f"Topic {tid} gone for user {user_id} — recreating")
+                db.set_topic_id(user_id, 0)
+                new_tid = get_or_create_topic(user_id, user_name)
+                if new_tid:
+                    bot.forward_message(
+                        LOG_GROUP_ID, chat_id, message_id, message_thread_id=new_tid
+                    )
+            else:
+                log.debug(f"Forward to topic failed: {e}")
     except Exception as e:
-        log.debug(f"Forward to topic failed: {e}")
+        log.debug(f"send_log_copy error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -416,17 +455,19 @@ def cmd_help(message):
 
     admin_extra = (
         "\n\n<b>👑 Admin Commands (work in forum topic or with user_id):</b>\n"
-        "  /ban [id]              — Ban user\n"
-        "  /unban [id]            — Unban user\n"
-        "  /premium [id]          — Grant premium (500/day)\n"
-        "  /limit [id] ‹n›        — Set limit; no number = restore defaults\n"
-        "  /add_info ‹text›       — Add to GLOBAL knowledge base\n"
-        "  /set_user_info [id] ‹t›— Set personal memory for user\n"
-        "  /set_tone [id] ‹tone›  — Set per-user AI reply tone\n"
-        "  /set_policy [id] ‹t›   — Set per-user behavior policy\n"
-        "  /broadcast ‹text›      — Message all users\n"
-        "  /reload                — Reload config files\n"
-        "  /stats                 — Bot statistics"
+        "  /ban [id]                  — Ban user\n"
+        "  /unban [id]                — Unban user\n"
+        "  /premium [id]              — Grant premium (500/day)\n"
+        "  /limit [id] ‹n›            — Set limit; no number = restore defaults\n"
+        "  /add_info ‹text›           — Add to GLOBAL knowledge base\n"
+        "  /set_user_info [id] ‹t›    — Set personal memory for user\n"
+        "  /set_tone [id] ‹tone›      — Set per-user AI reply tone\n"
+        "  /set_policy [id] ‹t›       — Set per-user behavior policy\n"
+        "  /clear_user_memory [id]    — Clear session history for user\n"
+        "  /wipe_memory [id]          — Wipe session + custom_info + tone\n"
+        "  /broadcast ‹text›          — Message all users\n"
+        "  /reload                    — Reload config files\n"
+        "  /stats                     — Bot statistics"
     )
 
     text = public_help + (admin_extra if is_admin(uid) else "")
@@ -848,6 +889,51 @@ def cmd_set_policy(message):
     bot.reply_to(message, f"✅ Policy set for <code>{uid}</code>.", parse_mode="HTML")
 
 
+@bot.message_handler(commands=["clear_user_memory"])
+@admin_only
+def cmd_clear_user_memory(message):
+    """Clear a specific user's AI session (conversation history only)."""
+    uid, _ = _admin_target_and_text(message)
+    if not uid:
+        bot.reply_to(
+            message,
+            "Usage: /clear_user_memory ‹user_id›  — or run inside their topic\n"
+            "Clears conversation session only. Custom info/policy stays.",
+        )
+        return
+    ai.clear_session(uid)
+    bot.reply_to(
+        message,
+        f"✅ Session cleared for <code>{uid}</code>.",
+        parse_mode="HTML",
+    )
+    log.info(f"Admin cleared session for user {uid}")
+
+
+@bot.message_handler(commands=["wipe_memory"])
+@admin_only
+def cmd_wipe_memory(message):
+    """Full memory wipe: session + custom_info + custom_tone for a user."""
+    uid, _ = _admin_target_and_text(message)
+    if not uid:
+        bot.reply_to(
+            message,
+            "Usage: /wipe_memory ‹user_id›  — or run inside their topic\n"
+            "Wipes session, custom_info, and custom_tone. Policy stays.",
+        )
+        return
+    ai.clear_session(uid)
+    db.set_user_field(uid, "custom_info", "")
+    db.set_user_field(uid, "custom_tone", "")
+    bot.reply_to(
+        message,
+        f"✅ Full memory wiped for <code>{uid}</code> "
+        f"(session + custom_info + custom_tone).",
+        parse_mode="HTML",
+    )
+    log.info(f"Admin wiped full memory for user {uid}")
+
+
 @bot.message_handler(commands=["broadcast"])
 @admin_only
 def cmd_broadcast(message):
@@ -879,6 +965,9 @@ def _do_broadcast(message, text: str):
 
 @bot.message_handler(content_types=["photo"])
 def handle_photo(message):
+    # SECURITY: admin/log group must NEVER reach AI pipeline
+    if message.chat.id == LOG_GROUP_ID:
+        return
     if message.chat.type != "private":
         return
     uid = message.from_user.id
@@ -1094,6 +1183,9 @@ def _stream_reply(chat_id: int, reply_to_id: int, prompt: str, image=None) -> st
 
 @bot.message_handler(content_types=["text"])
 def handle_text(message):
+    # SECURITY: admin/log group must NEVER reach AI pipeline
+    if message.chat.id == LOG_GROUP_ID:
+        return
     if message.chat.type != "private":
         return
     if message.text.startswith("/"):

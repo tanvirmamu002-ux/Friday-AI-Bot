@@ -4,3 +4,4 @@ pillow>=11.0.0
 duckduckgo-search>=7.0.0
 flask>=3.0.0
 requests>=2.32.0
+python-dotenv>=1.2.2

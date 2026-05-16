@@ -13,7 +13,7 @@ from google import genai
 log = logging.getLogger(__name__)
 
 MODEL_NAME        = "gemini-flash-lite-latest"
-SESSION_MAX_PAIRS = 10
+SESSION_MAX_PAIRS = 4
 CONFIG_DIR        = Path("config")
 
 # ══════════════════════════════════════════════════════════════════════════════
