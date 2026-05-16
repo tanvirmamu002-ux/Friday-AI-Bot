@@ -129,13 +129,14 @@ def check_user_access(message) -> bool:
 
     # Ban check (role stored in DB, set only by admin commands)
     if db.is_banned(uid):
-        bot.reply_to(message, "🚫 আপনি banned আছেন।")
+        bot.reply_to(message, "<b>Access Denied</b>\nআপনার অ্যাকাউন্ট সাময়িকভাবে নিষিদ্ধ।", parse_mode="HTML")
         return False
 
     # Rate limit (burst protection)
     if is_rate_limited(uid):
         bot.reply_to(message,
-            f"⏳ প্রতি মিনিটে সর্বোচ্চ {MAX_REQ_PER_MIN}টি request। একটু অপেক্ষা করুন।")
+            f"<b>Rate Limit</b>\nপ্রতি মিনিটে সর্বোচ্চ <code>{MAX_REQ_PER_MIN}</code> request। একটু অপেক্ষা করুন।",
+            parse_mode="HTML")
         return False
 
     # Daily limit enforcement
@@ -143,7 +144,8 @@ def check_user_access(message) -> bool:
         user = db.get_user(uid)
         lim  = user["daily_limit"] if user else 50
         bot.reply_to(message,
-            f"📊 আজকের {lim}টি request limit শেষ। কাল আবার চেষ্টা করুন।")
+            f"<b>Daily Limit Reached</b>\nআজকের <code>{lim}</code>টি request শেষ। কাল আবার চেষ্টা করুন।",
+            parse_mode="HTML")
         return False
 
     return True
@@ -402,24 +404,26 @@ def cmd_start(message):
     db.upsert_user(uid, uname)
 
     text = (
-        f"হ্যালো <b>{eh(uname)}</b>! 👋\n\n"
-        "আমি <b>Friday AI</b> — Advanced AI Assistant\n"
-        "নির্মাতা: <b>বোরহান</b> (<a href='https://t.me/hm_burhan'>@hm_burhan</a>)\n\n"
-        "<b>📋 Commands:</b>\n"
-        "🔍 /search ‹query› — Real-time Web Search\n"
-        "🎬 /yt ‹query›     — YouTube / Video\n"
-        "🖼 /image ‹query›  — Image Search\n"
-        "✨ /enhance         — Photo Enhancement\n"
-        "📊 /status          — Account Info\n"
-        "❓ /help            — All Commands\n"
-        "🔁 /clear           — Reset Chat Memory\n\n"
-        "সরাসরি যেকোনো প্রশ্ন করুন অথবা ছবি পাঠান! 🤖"
+        f"<b>Friday AI</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"হ্যালো, <b>{eh(uname)}</b>!\n\n"
+        "Advanced AI Assistant — powered by Gemini + real-time web search.\n"
+        f"নির্মাতা: <a href='https://t.me/hm_burhan'>@hm_burhan</a>\n\n"
+        "<b>Commands</b>\n"
+        "<code>/search</code> ‹query› — Real-time web search\n"
+        "<code>/yt</code> ‹query›     — Video search\n"
+        "<code>/image</code> ‹query›  — Image search\n"
+        "<code>/enhance</code>        — Photo enhancement\n"
+        "<code>/status</code>         — Account info\n"
+        "<code>/clear</code>          — Reset memory\n"
+        "<code>/help</code>           — All commands\n\n"
+        "যেকোনো প্রশ্ন বা ছবি সরাসরি পাঠান।"
     )
     bot.reply_to(message, text, parse_mode="HTML")
     send_log(
         uid,
         uname,
-        f"🚀 <b>New /start</b>\n👤 <b>{eh(uname)}</b>\n🆔 <code>{uid}</code>",
+        f"<b>New Start</b>\n<code>{uid}</code> — {eh(uname)}",
     )
 
 
@@ -433,41 +437,42 @@ def cmd_help(message):
     uid = message.from_user.id
 
     public_help = (
-        "❓ <b>Friday AI — Help</b>\n"
-        "নির্মাতা: বোরহান (@hm_burhan)\n\n"
-        "<b>💬 Chat:</b>\n"
-        "  যেকোনো প্রশ্ন সরাসরি পাঠান — AI উত্তর দেবে\n"
-        "  Current events/news স্বয়ংক্রিয়ভাবে web search করে উত্তর দেয়\n\n"
-        "<b>🔍 Search:</b>\n"
-        "  /search ‹keyword›  — Real-time web search\n"
-        "  /image ‹keyword›   — Image search\n"
-        "  /yt ‹keyword›      — YouTube/video search\n\n"
-        "<b>🖼 Image:</b>\n"
-        "  ছবি পাঠান → AI বিশ্লেষণ করবে\n"
-        "  /enhance → ছবি পাঠান → enhanced ছবি পাবেন\n\n"
-        "<b>📊 Account:</b>\n"
-        "  /status  — আপনার account status ও usage\n"
-        "  /clear   — কথোপকথনের memory মুছুন\n\n"
-        "<b>ℹ️ About:</b>\n"
-        "  Engine: Gemini AI + DuckDuckGo Search\n"
-        "  Powered by Friday AI | Made by @hm_burhan"
+        "<b>Friday AI — Help</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "<b>Chat</b>\n"
+        "যেকোনো প্রশ্ন সরাসরি পাঠান — AI উত্তর দেবে\n"
+        "News/events স্বয়ংক্রিয়ভাবে web search করে উত্তর দেয়\n\n"
+        "<b>Search</b>\n"
+        "<code>/search</code> ‹keyword› — Real-time web search\n"
+        "<code>/image</code>  ‹keyword› — Image search\n"
+        "<code>/yt</code>     ‹keyword› — Video search\n\n"
+        "<b>Image</b>\n"
+        "ছবি পাঠান → AI বিশ্লেষণ করবে\n"
+        "<code>/enhance</code> → ছবি পাঠান → enhanced ছবি পাবেন\n\n"
+        "<b>Account</b>\n"
+        "<code>/status</code> — Account info ও usage\n"
+        "<code>/clear</code>  — Memory reset\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "Engine: Gemini + DuckDuckGo  |  <a href='https://t.me/hm_burhan'>@hm_burhan</a>"
     )
 
     admin_extra = (
-        "\n\n<b>👑 Admin Commands (work in forum topic or with user_id):</b>\n"
-        "  /ban [id]                  — Ban user\n"
-        "  /unban [id]                — Unban user\n"
-        "  /premium [id]              — Grant premium (500/day)\n"
-        "  /limit [id] ‹n›            — Set limit; no number = restore defaults\n"
-        "  /add_info ‹text›           — Add to GLOBAL knowledge base\n"
-        "  /set_user_info [id] ‹t›    — Set personal memory for user\n"
-        "  /set_tone [id] ‹tone›      — Set per-user AI reply tone\n"
-        "  /set_policy [id] ‹t›       — Set per-user behavior policy\n"
-        "  /clear_user_memory [id]    — Clear session history for user\n"
-        "  /wipe_memory [id]          — Wipe session + custom_info + tone\n"
-        "  /broadcast ‹text›          — Message all users\n"
-        "  /reload                    — Reload config files\n"
-        "  /stats                     — Bot statistics"
+        "\n\n<b>Admin Commands</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "Run in user topic or pass [id] explicitly.\n\n"
+        "<code>/ban</code> [id]               — Ban user\n"
+        "<code>/unban</code> [id]             — Unban user\n"
+        "<code>/premium</code> [id]           — Grant premium (500/day)\n"
+        "<code>/limit</code> [id] ‹n›         — Set limit; no number = restore\n"
+        "<code>/add_info</code> ‹text›        — Append to global knowledge base\n"
+        "<code>/set_user_info</code> [id] ‹t› — Personal memory for user\n"
+        "<code>/set_tone</code> [id] ‹tone›   — Per-user reply tone\n"
+        "<code>/set_policy</code> [id] ‹t›    — Per-user behavior policy\n"
+        "<code>/clear_user_memory</code> [id] — Clear session history\n"
+        "<code>/wipe_memory</code> [id]       — Wipe session + info + tone\n"
+        "<code>/broadcast</code> ‹text›       — Message all users\n"
+        "<code>/reload</code>                 — Reload config files\n"
+        "<code>/stats</code>                  — Bot statistics"
     )
 
     text = public_help + (admin_extra if is_admin(uid) else "")
@@ -487,11 +492,13 @@ def cmd_status(message):
     if is_admin(uid):
         bot.reply_to(
             message,
-            "👑 <b>Admin Account</b>\n\n"
-            "✅ Unlimited usage\n"
-            "✅ No rate limits\n"
-            "✅ All commands enabled\n\n"
-            f"<i>Friday AI | @hm_burhan</i>",
+            "<b>Account Status</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            "Role: <code>owner</code>\n"
+            "Limit: Unlimited\n"
+            "Rate limit: None\n"
+            "━━━━━━━━━━━━━━\n"
+            "<a href='https://t.me/hm_burhan'>@hm_burhan</a>",
             parse_mode="HTML",
         )
         return
@@ -505,20 +512,20 @@ def cmd_status(message):
 
     remaining     = max(0, user["daily_limit"] - user["daily_count"])
     role          = user.get("role", "user")
-    premium_badge = "⭐ Premium" if role == db.ROLE_PREMIUM else "🆓 Free"
-    banned_badge  = "🚫 Banned"  if role == db.ROLE_BANNED  else "✅ Active"
+    role_label    = "premium" if role == db.ROLE_PREMIUM else ("banned" if role == db.ROLE_BANNED else "user")
     session_msgs  = ai.session_length(uid)
 
     text = (
-        f"📊 <b>Account Status</b>\n\n"
-        f"👤 Name  : <b>{eh(uname)}</b>\n"
-        f"🆔 ID    : <code>{uid}</code>\n"
-        f"🏷 Plan  : {premium_badge}\n"
-        f"🔰 Status: {banned_badge}\n\n"
-        f"📈 আজকের ব্যবহার : <b>{user['daily_count']}</b> / {user['daily_limit']}\n"
-        f"✨ বাকি requests  : <b>{remaining}</b>\n"
-        f"💬 Session memory : <b>{session_msgs}</b> messages\n\n"
-        f"<i>Powered by Friday AI | Made by @hm_burhan</i>"
+        f"<b>Account Status</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Name   : <b>{eh(uname)}</b>\n"
+        f"ID     : <code>{uid}</code>\n"
+        f"Role   : <code>{role_label}</code>\n\n"
+        f"Today  : <code>{user['daily_count']}</code> / <code>{user['daily_limit']}</code>\n"
+        f"Left   : <code>{remaining}</code> requests\n"
+        f"Memory : <code>{session_msgs}</code> messages\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"<a href='https://t.me/hm_burhan'>@hm_burhan</a>"
     )
     bot.reply_to(message, text, parse_mode="HTML")
 
@@ -555,11 +562,13 @@ def cmd_policy(message):
         per_user_note = "\n✅ আপনার জন্য বিশেষ chat settings active আছে।"
 
     text = (
-        "⚙️ <b>Chat Settings</b>\n\n"
-        + (f"✅ Enabled: {', '.join(enabled)}\n" if enabled else "")
-        + (f"🚫 Disabled: {', '.join(disabled)}\n" if disabled else "")
+        "<b>Chat Settings</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        + (f"Enabled  : {', '.join(enabled)}\n" if enabled else "")
+        + (f"Disabled : {', '.join(disabled)}\n" if disabled else "")
         + per_user_note
-        + "\n\n<i>Friday AI | @hm_burhan</i>"
+        + "\n━━━━━━━━━━━━━━\n"
+        "<a href='https://t.me/hm_burhan'>@hm_burhan</a>"
     )
     bot.reply_to(message, text, parse_mode="HTML")
 
@@ -572,7 +581,7 @@ def cmd_clear(message):
     if message.chat.type != "private":
         return
     ai.clear_session(message.from_user.id)
-    bot.reply_to(message, "✅ কথোপকথনের ইতিহাস মুছে গেছে।")
+    bot.reply_to(message, "<b>Memory Cleared</b>\nকথোপকথনের ইতিহাস মুছে গেছে।", parse_mode="HTML")
 
 
 # ── /search ────────────────────────────────────────────────────────────────────
@@ -586,7 +595,7 @@ def cmd_search(message):
         return
     query = _arg(message, 1)
     if not query:
-        bot.reply_to(message, "ব্যবহার: /search ‹keyword›")
+        bot.reply_to(message, "Usage: <code>/search</code> ‹keyword›", parse_mode="HTML")
         return
     react_ok(message.chat.id, message.message_id)
     executor.submit(_do_search, message, query)
@@ -604,10 +613,10 @@ def _do_search(message, query: str):
         bot.reply_to(message, chunks[0], parse_mode="HTML")
         for chunk in chunks[1:]:
             bot.send_message(message.chat.id, chunk, parse_mode="HTML")
-        send_log(uid, uname, f"🔍 <b>Search</b>\n{eh(query)}\n\n💬 {eh(answer[:300])}")
+        send_log(uid, uname, f"<b>Search</b>: {eh(query)}\n{eh(answer[:200])}")
     except Exception as e:
         log.error(f"Search error: {e}")
-        bot.reply_to(message, "🔍 Search করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+        bot.reply_to(message, "Search করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
 
 
 # ── /yt ────────────────────────────────────────────────────────────────────────
@@ -621,7 +630,7 @@ def cmd_yt(message):
         return
     query = _arg(message, 1)
     if not query:
-        bot.reply_to(message, "ব্যবহার: /yt ‹keyword›")
+        bot.reply_to(message, "Usage: <code>/yt</code> ‹keyword›", parse_mode="HTML")
         return
     react_ok(message.chat.id, message.message_id)
     executor.submit(_do_yt, message, query)
@@ -634,15 +643,15 @@ def _do_yt(message, query: str):
         bot.send_chat_action(message.chat.id, "typing")
         videos = se.video_search(query, max_results=5)
         if videos:
-            text = "🎬 <b>Video Results</b>\n\n"
+            text = f"<b>Video Results</b> — {eh(query)}\n━━━━━━━━━━━━━━\n"
             for v in videos[:5]:
                 title = eh((v.get("title") or "No Title")[:100])
-                url = eh(v.get("content") or v.get("embed_url", ""))
-                text += f"• <b>{title}</b>\n{url}\n\n"
+                url   = v.get("content") or v.get("embed_url", "")
+                text += f"<b>{title}</b>\n<code>{eh(url)}</code>\n\n"
             bot.reply_to(message, text, parse_mode="HTML")
         else:
             bot.reply_to(message, "কোনো ভিডিও পাওয়া যায়নি।")
-        send_log(uid, uname, f"🎬 <b>YT Search</b>: {eh(query)}")
+        send_log(uid, uname, f"<b>YT</b>: {eh(query)}")
     except Exception as e:
         log.error(f"YT error: {e}")
         bot.reply_to(message, "Video search করতে সমস্যা হয়েছে।")
@@ -659,7 +668,7 @@ def cmd_image(message):
         return
     query = _arg(message, 1)
     if not query:
-        bot.reply_to(message, "ব্যবহার: /image ‹keyword›")
+        bot.reply_to(message, "Usage: <code>/image</code> ‹keyword›", parse_mode="HTML")
         return
     react_ok(message.chat.id, message.message_id)
     executor.submit(_do_image, message, query)
@@ -672,23 +681,23 @@ def _do_image(message, query: str):
         bot.send_chat_action(message.chat.id, "upload_photo")
         results = se.image_search(query, max_results=12)
         if not results:
-            bot.reply_to(message, f"🖼 '{eh(query)}' এর জন্য কোনো ছবি পাওয়া যায়নি।")
+            bot.reply_to(message, f"<b>No Results</b>\n<code>{eh(query)}</code> এর জন্য কোনো ছবি পাওয়া যায়নি।", parse_mode="HTML")
             return
         sent = it.send_photo_safe(
             bot,
             message.chat.id,
             results,
-            caption=f"🖼 {query}",
+            caption=query,
             reply_to=message.message_id,
         )
         if not sent:
-            bot.reply_to(message, "🖼 ছবি পাঠাতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
+            bot.reply_to(message, "ছবি পাঠাতে সমস্যা হয়েছে। আবার চেষ্টা করুন।")
             return
         db.increment_daily_count(uid)
-        send_log(uid, uname, f"🖼 <b>Image</b>: {eh(query)}")
+        send_log(uid, uname, f"<b>Image</b>: {eh(query)}")
     except Exception as e:
         log.error(f"Image error: {e}")
-        bot.reply_to(message, "🖼 Image search error। আবার চেষ্টা করুন।")
+        bot.reply_to(message, "Image search error। আবার চেষ্টা করুন।")
 
 
 # ── /enhance ───────────────────────────────────────────────────────────────────
@@ -705,7 +714,7 @@ def cmd_enhance(message):
         return
     with _enhance_lock:
         _enhance_pending[message.from_user.id] = True
-    bot.reply_to(message, "✨ এখন একটি ছবি পাঠান — sharpen, denoise ও upscale করা হবে।")
+    bot.reply_to(message, "<b>Enhance Ready</b>\nএখন একটি ছবি পাঠান — sharpen, denoise ও upscale করা হবে।", parse_mode="HTML")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -718,7 +727,11 @@ def cmd_enhance(message):
 def cmd_reload(message):
     cfg = ai.reload_configs()
     loaded = sum(1 for v in cfg.values() if v)
-    bot.reply_to(message, f"✅ Config reloaded! {loaded}/{len(cfg)} files loaded.")
+    bot.reply_to(
+        message,
+        f"<b>Config Reloaded</b>\n<code>{loaded}/{len(cfg)}</code> files loaded.",
+        parse_mode="HTML",
+    )
     log.info("Config reloaded by admin")
 
 
@@ -727,18 +740,21 @@ def cmd_reload(message):
 def cmd_stats(message):
     try:
         all_ids = db.get_all_user_ids()
-        total = len(all_ids)
+        total   = len(all_ids)
         bot.reply_to(
             message,
-            f"📊 <b>Bot Statistics</b>\n\n"
-            f"👥 Total users: <b>{total}</b>\n"
-            f"🤖 Bot: Friday AI\n"
-            f"🔑 Gemini keys: 3\n"
-            f"<i>@hm_burhan</i>",
+            "<b>Bot Statistics</b>\n"
+            "━━━━━━━━━━━━━━\n"
+            f"Total users : <code>{total}</code>\n"
+            "Bot         : Friday AI\n"
+            "Gemini keys : <code>3</code>\n"
+            "Session cap : <code>4</code> pairs\n"
+            "━━━━━━━━━━━━━━\n"
+            "<a href='https://t.me/hm_burhan'>@hm_burhan</a>",
             parse_mode="HTML",
         )
     except Exception as e:
-        bot.reply_to(message, f"Stats error: {e}")
+        bot.reply_to(message, f"<b>Error</b>\n<code>{eh(str(e))}</code>", parse_mode="HTML")
 
 
 @bot.message_handler(commands=["ban"])
@@ -746,10 +762,10 @@ def cmd_stats(message):
 def cmd_ban(message):
     uid = resolve_target(message)
     if not uid:
-        bot.reply_to(message, "Usage: /ban ‹user_id›  or run from user's topic")
+        bot.reply_to(message, "Usage: <code>/ban</code> ‹user_id›  — or run in topic", parse_mode="HTML")
         return
     db.set_user_field(uid, "is_banned", 1)
-    bot.reply_to(message, f"✅ User <code>{uid}</code> banned.", parse_mode="HTML")
+    bot.reply_to(message, f"<b>Banned</b>\n<code>{uid}</code>", parse_mode="HTML")
     log.info(f"Admin banned user {uid}")
 
 
@@ -758,10 +774,10 @@ def cmd_ban(message):
 def cmd_unban(message):
     uid = resolve_target(message)
     if not uid:
-        bot.reply_to(message, "Usage: /unban ‹user_id›")
+        bot.reply_to(message, "Usage: <code>/unban</code> ‹user_id›  — or run in topic", parse_mode="HTML")
         return
     db.set_user_field(uid, "is_banned", 0)
-    bot.reply_to(message, f"✅ User <code>{uid}</code> unbanned.", parse_mode="HTML")
+    bot.reply_to(message, f"<b>Unbanned</b>\n<code>{uid}</code>", parse_mode="HTML")
 
 
 @bot.message_handler(commands=["premium"])
@@ -769,17 +785,13 @@ def cmd_unban(message):
 def cmd_premium(message):
     uid = resolve_target(message)
     if not uid:
-        bot.reply_to(
-            message,
-            "Usage: /premium ‹user_id›\n"
-            "Or run this command inside the user's forum topic.",
-        )
+        bot.reply_to(message, "Usage: <code>/premium</code> ‹user_id›  — or run in topic", parse_mode="HTML")
         return
     db.set_user_field(uid, "is_premium", 1)
     db.set_user_field(uid, "daily_limit", 500)
     bot.reply_to(
         message,
-        f"⭐ User <code>{uid}</code> is now <b>Premium</b> (500 requests/day).",
+        f"<b>Premium Granted</b>\n<code>{uid}</code>  —  500 requests/day",
         parse_mode="HTML",
     )
     log.info(f"Admin granted premium to {uid}")
@@ -790,7 +802,7 @@ def cmd_premium(message):
 def cmd_limit(message):
     uid = resolve_target(message)
     if not uid:
-        bot.reply_to(message, "Usage: /limit ‹user_id› ‹number›  — or run in topic")
+        bot.reply_to(message, "Usage: <code>/limit</code> ‹user_id› ‹n›  — no number = restore defaults", parse_mode="HTML")
         return
     parts = message.text.split()
     # If a number is provided → set that specific limit
@@ -801,7 +813,7 @@ def cmd_limit(message):
         db.set_user_field(uid, "daily_limit", new_limit)
         bot.reply_to(
             message,
-            f"✅ Daily limit for <code>{uid}</code> set to <b>{new_limit}</b>.",
+            f"<b>Limit Updated</b>\n<code>{uid}</code>  —  <code>{new_limit}</code>/day",
             parse_mode="HTML",
         )
     except (ValueError, IndexError):
@@ -809,7 +821,7 @@ def cmd_limit(message):
         db.set_user_field(uid, "is_premium", 0)  # sets role=user, limit=50
         bot.reply_to(
             message,
-            f"✅ User <code>{uid}</code> restored to normal limits (50/day, free plan).",
+            f"<b>Restored</b>\n<code>{uid}</code>  —  50/day (free plan)",
             parse_mode="HTML",
         )
         log.info(f"Admin restored defaults for {uid}")
@@ -822,7 +834,7 @@ def cmd_add_info(message):
     parts = message.text.split(None, 1)
     info = parts[1].strip() if len(parts) >= 2 else ""
     if not info:
-        bot.reply_to(message, "Usage: /add_info ‹text to add globally›")
+        bot.reply_to(message, "Usage: <code>/add_info</code> ‹text to add globally›", parse_mode="HTML")
         return
     kb_path = ai.CONFIG_DIR / "knowledge_base.txt"
     try:
@@ -830,12 +842,10 @@ def cmd_add_info(message):
         separator = "\n\n" if existing.strip() else ""
         kb_path.write_text(existing + separator + info, encoding="utf-8")
         ai.reload_configs()
-        bot.reply_to(
-            message, "✅ Global knowledge base updated and reloaded.", parse_mode="HTML"
-        )
+        bot.reply_to(message, "<b>Knowledge Base Updated</b>\nGlobal context reloaded.", parse_mode="HTML")
         log.info(f"Admin appended to knowledge_base.txt: {info[:60]}")
     except Exception as e:
-        bot.reply_to(message, f"❌ Error updating knowledge base: {e}")
+        bot.reply_to(message, f"<b>Error</b>\n<code>{eh(str(e))}</code>", parse_mode="HTML")
 
 
 @bot.message_handler(commands=["set_user_info"])
@@ -844,15 +854,12 @@ def cmd_set_user_info(message):
     """Set personal memory/behavior for a specific user (stored in DB)."""
     uid, info = _admin_target_and_text(message)
     if not uid or not info:
-        bot.reply_to(
-            message,
-            "Usage: /set_user_info ‹user_id› ‹info text›  — or run in topic",
-        )
+        bot.reply_to(message, "Usage: <code>/set_user_info</code> ‹user_id› ‹info›  — or run in topic", parse_mode="HTML")
         return
     db.set_user_field(uid, "custom_info", info)
     bot.reply_to(
         message,
-        f"✅ Personal info set for <code>{uid}</code>.",
+        f"<b>User Info Set</b>\n<code>{uid}</code>",
         parse_mode="HTML",
     )
 
@@ -865,14 +872,15 @@ def cmd_set_tone(message):
     if not uid or not tone:
         bot.reply_to(
             message,
-            "Usage: /set_tone ‹user_id› ‹tone description›  — or run in topic\n"
-            "Example: /set_tone 12345 Reply in formal English only, no emojis.",
+            "Usage: <code>/set_tone</code> ‹user_id› ‹tone›  — or run in topic\n"
+            "Example: <code>/set_tone 12345 Reply in formal English only.</code>",
+            parse_mode="HTML",
         )
         return
     db.set_user_field(uid, "custom_tone", tone)
     bot.reply_to(
         message,
-        f"✅ Tone set for <code>{uid}</code>:\n<i>{eh(tone)}</i>",
+        f"<b>Tone Set</b>\n<code>{uid}</code>\n━━━━━━━━━━━━━━\n{eh(tone)}",
         parse_mode="HTML",
     )
     log.info(f"Admin set custom_tone for {uid}: {tone[:60]}")
@@ -883,10 +891,10 @@ def cmd_set_tone(message):
 def cmd_set_policy(message):
     uid, pol = _admin_target_and_text(message)
     if not uid or not pol:
-        bot.reply_to(message, "Usage: /set_policy ‹user_id› ‹policy text›  — or run in topic")
+        bot.reply_to(message, "Usage: <code>/set_policy</code> ‹user_id› ‹policy›  — or run in topic", parse_mode="HTML")
         return
     db.set_user_field(uid, "policy", pol)
-    bot.reply_to(message, f"✅ Policy set for <code>{uid}</code>.", parse_mode="HTML")
+    bot.reply_to(message, f"<b>Policy Set</b>\n<code>{uid}</code>", parse_mode="HTML")
 
 
 @bot.message_handler(commands=["clear_user_memory"])
@@ -897,14 +905,15 @@ def cmd_clear_user_memory(message):
     if not uid:
         bot.reply_to(
             message,
-            "Usage: /clear_user_memory ‹user_id›  — or run inside their topic\n"
-            "Clears conversation session only. Custom info/policy stays.",
+            "Usage: <code>/clear_user_memory</code> ‹user_id›  — or run in topic\n"
+            "Clears session only. Info/policy stays.",
+            parse_mode="HTML",
         )
         return
     ai.clear_session(uid)
     bot.reply_to(
         message,
-        f"✅ Session cleared for <code>{uid}</code>.",
+        f"<b>Session Cleared</b>\n<code>{uid}</code>",
         parse_mode="HTML",
     )
     log.info(f"Admin cleared session for user {uid}")
@@ -918,8 +927,9 @@ def cmd_wipe_memory(message):
     if not uid:
         bot.reply_to(
             message,
-            "Usage: /wipe_memory ‹user_id›  — or run inside their topic\n"
-            "Wipes session, custom_info, and custom_tone. Policy stays.",
+            "Usage: <code>/wipe_memory</code> ‹user_id›  — or run in topic\n"
+            "Wipes session + info + tone. Policy stays.",
+            parse_mode="HTML",
         )
         return
     ai.clear_session(uid)
@@ -927,8 +937,7 @@ def cmd_wipe_memory(message):
     db.set_user_field(uid, "custom_tone", "")
     bot.reply_to(
         message,
-        f"✅ Full memory wiped for <code>{uid}</code> "
-        f"(session + custom_info + custom_tone).",
+        f"<b>Memory Wiped</b>\n<code>{uid}</code>\n━━━━━━━━━━━━━━\nSession, info, tone cleared.",
         parse_mode="HTML",
     )
     log.info(f"Admin wiped full memory for user {uid}")
@@ -939,7 +948,7 @@ def cmd_wipe_memory(message):
 def cmd_broadcast(message):
     text = message.text.split(None, 1)
     if len(text) < 2 or not text[1].strip():
-        bot.reply_to(message, "Usage: /broadcast ‹message›")
+        bot.reply_to(message, "Usage: <code>/broadcast</code> ‹message›", parse_mode="HTML")
         return
     executor.submit(_do_broadcast, message, text[1].strip())
 
@@ -954,7 +963,13 @@ def _do_broadcast(message, text: str):
             time.sleep(0.05)
         except Exception:
             failed += 1
-    bot.reply_to(message, f"📢 Broadcast: ✅ {sent} sent, ❌ {failed} failed.")
+    bot.reply_to(
+        message,
+        f"<b>Broadcast Complete</b>\n"
+        f"Sent   : <code>{sent}</code>\n"
+        f"Failed : <code>{failed}</code>",
+        parse_mode="HTML",
+    )
     log.info(f"Broadcast: {sent} sent, {failed} failed")
 
 
@@ -999,20 +1014,20 @@ def _do_enhance(message):
             return
         out = it.enhance_image(src)
         if not out:
-            bot.reply_to(message, "✨ Enhancement unavailable (Pillow error)।")
+            bot.reply_to(message, "<b>Enhancement Unavailable</b>\nPillow error — আবার চেষ্টা করুন।", parse_mode="HTML")
             return
         with open(out, "rb") as f:
             bot.send_photo(
                 message.chat.id,
                 f,
-                caption="✨ Enhanced — sharpen + denoise + upscale applied.",
+                caption="Enhanced — sharpen + denoise + upscale applied.",
                 reply_to_message_id=message.message_id,
             )
         db.increment_daily_count(uid)
-        send_log(uid, uname, "✨ <b>Image Enhanced</b>")
+        send_log(uid, uname, "<b>Image Enhanced</b>")
     except Exception as e:
         log.error(f"Enhance error: {e}")
-        bot.reply_to(message, "✨ Enhancement failed। আবার চেষ্টা করুন।")
+        bot.reply_to(message, "Enhancement failed। আবার চেষ্টা করুন।")
     finally:
         it.cleanup(src, out)
 
