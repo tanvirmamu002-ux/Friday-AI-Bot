@@ -1,0 +1,81 @@
+modules = ["nodejs-24", "python-3.12"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Bot"
+
+[[workflows.workflow]]
+name = "Telegram Bot"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
+waitForPort = 5000
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[[ports]]
+localPort = 5000
+externalPort = 5000
+
+[[ports]]
+localPort = 5001
+externalPort = 4200
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 80
+
+[[ports]]
+localPort = 8082
+externalPort = 3000
+
+[[ports]]
+localPort = 8083
+externalPort = 3001
+
+[[ports]]
+localPort = 8084
+externalPort = 3002
+
+[nix]
+channel = "stable-25_05"
+packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "tcl", "tk", "zlib"]
+
+[userenv]
+
+[userenv.shared]
+GEMINI_KEY_1 = "AIzaSyD6ssOyp2xrQB_t5ZNFiWlNXSZnEzPBYFw"
+GEMINI_KEY_2 = "AIzaSyDBLHOjDV386-6aSx-NGtVvqEMVl9lxT0M"
+GEMINI_KEY_3 = "AIzaSyCmQwXL9sW6vX5ctkhhfT--9xJgnyS9a10"
+BOT_TOKEN = "8738670027:AAE7wmdwAmJOsTs30SEz-v9VCQwaXIE3GDE"

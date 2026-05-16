@@ -47,9 +47,37 @@ def sanitize_snippet(text: str) -> str:
     return " ".join(clean).strip()
 
 
-# ── Auto-detect real-time search need ─────────────────────────────────────────
+# ── Queries that must NEVER trigger search (keep fast) ────────────────────────
 
-_REALTIME_PATTERNS = [
+_SKIP_PATTERNS = [
+    # Greetings / chitchat
+    r"^(hello|hi|hey|হ্যালো|হাই|assalamu|salam|আসসালামু|সালাম)\b",
+    r"^(how are you|আপনি কেমন|কেমন আছেন|কি খবর|কেমন চলছে)\b",
+    r"^(good (morning|afternoon|evening|night)|শুভ (সকাল|বিকাল|সন্ধ্যা|রাত))\b",
+    r"^(thanks|thank you|ধন্যবাদ|থ্যাংক|ok|okay|আচ্ছা|ঠিক আছে)\b",
+    # Pure math / calculation
+    r"\b(calculate|compute|simplify|factori[sz]e|differentiate|integrate)\b",
+    r"\b(derivative|integral|equation|algebra|geometry|trigonometry)\b",
+    r"^[\d\s\+\-\*\/\^\.\(\)]+[\=\?]",      # bare arithmetic like "2+2=?"
+    # Code writing / debugging
+    r"\b(write|create|generate|give me).{0,25}(code|function|script|program|snippet|class|loop)\b",
+    r"\b(debug|fix|there('s| is) an? (error|bug)|syntax error).{0,25}(code|script|function)\b",
+    r"\bhow to (code|program|implement) .{0,25}(in python|in javascript|in java|in c\+\+|in sql|in php)\b",
+    # Storytelling / creative writing
+    r"\b(write|compose|create|tell me).{0,30}(story|poem|essay|song|lyrics|গল্প|কবিতা|রচনা|গান)\b",
+    # Translation (output is deterministic)
+    r"\b(translate|অনুবাদ করো|অনুবাদ করুন|translate this)\b",
+    # Definitions of immutable concepts
+    r"\bwhat is (an? )?(photosynthesis|gravity|newton|einstein|theory of (relativity|evolution)|"
+    r"pythagorean|quadratic formula|ohm.s law|boyle.s law|mendel)\b",
+]
+_SKIP_RE = re.compile("|".join(_SKIP_PATTERNS), re.IGNORECASE)
+
+
+# ── Patterns that always require live search ───────────────────────────────────
+
+_FORCE_PATTERNS = [
+    # ── Temporal / news ──────────────────────────────────────────────────────
     r"আজক[ের]+", r"এখন", r"বর্তমান", r"সর্বশেষ", r"তাজা",
     r"চলতি", r"হালনাগাদ", r"ব্রেকিং", r"নতুন খবর",
     r"\btoday\b", r"\bnow\b", r"\bcurrent(ly)?\b", r"\blatest\b",
@@ -57,23 +85,71 @@ _REALTIME_PATTERNS = [
     r"\bthis (week|month|year)\b", r"\bright now\b",
     r"\b202[4-9]\b", r"\b203\d\b",
     r"\bnews\b", r"খবর", r"সংবাদ",
-    r"weather|আবহাওয়া|তাপমাত্রা|বৃষ্টি",
-    r"price|দাম|রেট|মূল্য",
-    r"dollar|euro|টাকা|exchange rate|বিনিময়",
+    # ── Weather / environment ─────────────────────────────────────────────────
+    r"weather|আবহাওয়া|তাপমাত্রা|বৃষ্টি|flood|বন্যা|earthquake|ভূমিকম্প",
+    # ── Finance / markets ─────────────────────────────────────────────────────
+    r"\bprice\b|দাম|রেট|মূল্য",
+    r"\bdollar\b|euro|exchange rate|বিনিময়",
+    r"\bstock\b|\bshare price\b|\bmarket cap\b|\bvaluation\b|\bnet worth\b",
+    r"bitcoin|crypto|বাজার|শেয়ার",
+    r"সম্পদ|কোটি টাকা",
+    # ── Politics / government ─────────────────────────────────────────────────
     r"election|নির্বাচন|ভোট",
-    r"president|prime minister|প্রধানমন্ত্রী|রাষ্ট্রপতি|সরকার",
-    r"minister|মন্ত্রী|রাজনীতি|politics",
+    r"\b(who is (the )?(current |new |present )?(president|prime minister|pm|minister|"
+    r"governor|chancellor|secretary|senator|congressman|mp|mla))\b",
+    r"\b(president|prime minister|প্রধানমন্ত্রী|রাষ্ট্রপতি) of\b",
+    r"minister|মন্ত্রী|রাজনীতি|politics|সরকার|parliament|cabinet",
+    # ── People — age / roles / net worth ─────────────────────────────────────
+    r"\bhow old (is|was|are)\b",
+    r"\bage of\b",
+    r"কত বছর (বয়স|বয়েস|বয়সী)|বয়স কত|কত বয়সে",
+    r"\b(ceo|cto|cfo|coo|chairman|founder|owner|director) of\b",
+    r"\bwho (runs|leads|heads|owns|controls|founded)\b",
+    r"\bwho (is|was) the (ceo|chairman|owner|founder|director|head|chief)\b",
+    r"কে (প্রতিষ্ঠা করেন|পরিচালনা করেন|চেয়ারম্যান|সিইও|মালিক)",
+    # "Who is [First Last]" — asking about a real public person (2+ word name)
+    r"\bwho is [a-z]+ [a-z]+",
+    # ── AI / tech models (always changing) ───────────────────────────────────
+    r"\b(gpt-?\d|claude[\s-]?\d|gemini (pro|ultra|flash|1|2|3)|llama[\s-]?\d|"
+    r"deepseek|grok|mistral|copilot)\b",
+    r"\b(latest|newest|best|current).{0,20}(ai model|llm|language model|chatbot|version|update|release)\b",
+    r"\b(iphone|samsung galaxy|pixel) \d+\b",
+    # ── Rankings / statistics ─────────────────────────────────────────────────
+    r"\b(rank(ing)?|ranked|top \d+|number \d+|#\d+)\b",
+    r"\b(population|gdp|unemployment rate|inflation rate|literacy rate|birth rate|"
+    r"poverty rate|growth rate)\b",
+    r"জনসংখ্যা|জিডিপি|বেকারত্ব|মূল্যস্ফীতি|সাক্ষরতার হার",
+    r"\b(richest|wealthiest|most powerful|top billionaire)\b",
+    # ── Awards / records / sports ─────────────────────────────────────────────
+    r"\b(who won|who is the winner|who is the champion|world record)\b",
+    r"\b(oscar|grammy|nobel prize|pulitzer|fifa best|ballon d.or|man of the match)\b",
+    r"\b(score|match result|standings|points table|league table)\b",
     r"match|score|খেলা|cricket|football|ক্রিকেট|ফুটবল",
-    r"stock|শেয়ার|bitcoin|crypto|বাজার",
-    r"accident|দুর্ঘটনা|আগুন|flood|বন্যা|earthquake|ভূমিকম্প",
+    # ── Crisis / events ───────────────────────────────────────────────────────
+    r"accident|দুর্ঘটনা|আগুন|war|যুদ্ধ|conflict|সংঘাত|attack|হামলা",
     r"covid|virus|pandemic|মহামারী",
-    r"war|যুদ্ধ|conflict|সংঘাত|attack|হামলা",
 ]
-_REALTIME_RE = re.compile("|".join(_REALTIME_PATTERNS), re.IGNORECASE)
+_FORCE_RE = re.compile("|".join(_FORCE_PATTERNS), re.IGNORECASE)
 
 
+def should_search(query: str) -> bool:
+    """
+    Return True if the query needs a live DuckDuckGo search.
+
+    Decision order:
+      1. If query matches _SKIP_RE  → False  (math / code / greetings / creative)
+      2. If query matches _FORCE_RE → True   (temporal / entity / dynamic facts)
+      3. Default                    → False  (normal AI conversation)
+    """
+    q = query.strip()
+    if _SKIP_RE.search(q):
+        return False
+    return bool(_FORCE_RE.search(q))
+
+
+# Kept for backward compatibility
 def needs_realtime_search(text: str) -> bool:
-    return bool(_REALTIME_RE.search(text))
+    return should_search(text)
 
 
 # ── Core search + summarise ───────────────────────────────────────────────────

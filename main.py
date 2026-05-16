@@ -1222,10 +1222,10 @@ def _do_ai_chat(message):
         user_data = db.get_user(uid) or {}
         role      = _user_role(user_data, uid)
 
-        # Auto-detect real-time search need
+        # Auto-detect real-time search need (entity + temporal aware)
         search_ctx = None
-        if se.needs_realtime_search(user_text):
-            log.info(f"Auto-search: {user_text[:60]}")
+        if se.should_search(user_text):
+            log.info(f"Auto-search triggered: {user_text[:60]}")
             search_ctx = _get_search_context(user_text)
 
         prompt = ai.build_prompt(
