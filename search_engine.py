@@ -202,18 +202,25 @@ def web_search_and_summarize(query: str, generate_fn) -> str:
 
 
 def image_search(query: str, max_results: int = 12) -> list[dict]:
+    """Search DuckDuckGo for images. Tries moderate then off safesearch as fallback."""
     if not DDG_AVAILABLE:
         return []
-    try:
-        with DDGS() as ddgs:
-            imgs = list(ddgs.images(query, max_results=max_results, safesearch="moderate"))
-        return [
-            i for i in imgs
-            if is_safe_result(i.get("title",""), "", i.get("image",""))
-        ]
-    except Exception as e:
-        log.warning(f"DDG image search error: {e}")
-        return []
+    for safesearch in ("moderate", "off"):
+        try:
+            with DDGS() as ddgs:
+                imgs = list(ddgs.images(
+                    query, max_results=max_results + 6, safesearch=safesearch
+                ))
+            filtered = [
+                i for i in imgs
+                if i.get("image") and is_safe_result(i.get("title", ""), "", i.get("image", ""))
+            ]
+            if filtered:
+                log.info(f"Image search '{query[:40]}': {len(filtered)} results")
+                return filtered[:max_results]
+        except Exception as e:
+            log.warning(f"DDG image search (safesearch={safesearch}): {e}")
+    return []
 
 
 def video_search(query: str, max_results: int = 5) -> list[dict]:

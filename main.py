@@ -186,8 +186,15 @@ def _is_thread_gone(err: Exception) -> bool:
 def _send_chunks(
     chat_id: int, text: str, thread_id: int | None, parse_mode: str = "HTML"
 ):
-    for i in range(0, max(len(text), 1), TG_MAX_LEN):
-        chunk = text[i : i + TG_MAX_LEN]
+    # Split safely — never break an HTML tag across message boundaries
+    if parse_mode == "HTML":
+        chunks = fmt.split_html_safe(text, max_len=TG_MAX_LEN)
+    else:
+        chunks = [text[i : i + TG_MAX_LEN] for i in range(0, max(len(text), 1), TG_MAX_LEN)]
+
+    for chunk in chunks:
+        if not chunk:
+            continue
         try:
             if thread_id:
                 bot.send_message(
@@ -787,8 +794,8 @@ def cmd_premium(message):
     if not uid:
         bot.reply_to(message, "Usage: <code>/premium</code> ‹user_id›  — or run in topic", parse_mode="HTML")
         return
+    # _set_role sets both role=premium AND daily_limit=500 atomically
     db.set_user_field(uid, "is_premium", 1)
-    db.set_user_field(uid, "daily_limit", 500)
     bot.reply_to(
         message,
         f"<b>Premium Granted</b>\n<code>{uid}</code>  —  500 requests/day",
@@ -805,20 +812,23 @@ def cmd_limit(message):
         bot.reply_to(message, "Usage: <code>/limit</code> ‹user_id› ‹n›  — no number = restore defaults", parse_mode="HTML")
         return
     parts = message.text.split()
-    # If a number is provided → set that specific limit
+    # BUGFIX: parts[-1] could be the user_id itself if no N given.
+    # A valid limit is a non-negative integer ≤ 100,000 that is NOT the user_id.
     try:
-        new_limit = int(parts[-1])
-        if new_limit < 0:
-            raise ValueError
-        db.set_user_field(uid, "daily_limit", new_limit)
+        candidate = int(parts[-1])
+        if candidate == uid or not (0 <= candidate <= 100_000):
+            # Last token is the uid or out of range — treat as "restore defaults"
+            raise ValueError("not a valid limit")
+        db.set_user_field(uid, "daily_limit", candidate)
         bot.reply_to(
             message,
-            f"<b>Limit Updated</b>\n<code>{uid}</code>  —  <code>{new_limit}</code>/day",
+            f"<b>Limit Updated</b>\n<code>{uid}</code>  —  <code>{candidate}</code>/day",
             parse_mode="HTML",
         )
+        log.info(f"Admin set limit {candidate}/day for {uid}")
     except (ValueError, IndexError):
-        # No number → restore to normal free user defaults (remove premium)
-        db.set_user_field(uid, "is_premium", 0)  # sets role=user, limit=50
+        # No valid N → restore role to user, limit to 50/day
+        db.set_user_field(uid, "is_premium", 0)  # _set_role sets role=user, limit=50
         bot.reply_to(
             message,
             f"<b>Restored</b>\n<code>{uid}</code>  —  50/day (free plan)",
@@ -973,6 +983,39 @@ def _do_broadcast(message, text: str):
     log.info(f"Broadcast: {sent} sent, {failed} failed")
 
 
+@bot.message_handler(commands=["notify"])
+@admin_only
+def cmd_notify(message):
+    """Send a direct private notification to a specific user. Backend only."""
+    parts = message.text.split(None, 2)
+    if len(parts) < 3:
+        bot.reply_to(
+            message,
+            "Usage: <code>/notify</code> ‹user_id› ‹message›",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        target_uid = int(parts[1])
+    except ValueError:
+        bot.reply_to(message, "<b>Error</b>\nInvalid user_id.", parse_mode="HTML")
+        return
+    text = parts[2].strip()
+    if not text:
+        bot.reply_to(message, "<b>Error</b>\nMessage cannot be empty.", parse_mode="HTML")
+        return
+    try:
+        bot.send_message(target_uid, text)
+        bot.reply_to(
+            message,
+            f"<b>Notification Sent</b>\n<code>{target_uid}</code>",
+            parse_mode="HTML",
+        )
+        log.info(f"Admin notified user {target_uid}: {text[:60]}")
+    except Exception as e:
+        bot.reply_to(message, f"<b>Failed</b>\n<code>{eh(str(e))}</code>", parse_mode="HTML")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PHOTO HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1046,15 +1089,25 @@ def _do_photo_ai(message):
         from PIL import Image
 
         img = Image.open(src)
-        caption = message.caption or "এই ছবিটি বিশ্লেষণ করো এবং বিস্তারিত বলো।"
+        # Use BOTH the image AND the caption text together
+        caption_text = (message.caption or "").strip()
+        if caption_text:
+            # User sent a question/instruction along with the image
+            user_query   = caption_text
+            session_text = caption_text
+        else:
+            user_query   = "এই ছবিটি বিশ্লেষণ করো এবং বিস্তারিত বলো।"
+            session_text = "[User sent an image]"
+
         user_data = db.get_user(uid) or {}
         role = _user_role(user_data, uid)
         prompt = ai.build_prompt(
-            uid, caption, user_data, user_name=uname, user_role=role
+            uid, user_query, user_data, user_name=uname, user_role=role
         )
+        # image is passed alongside the prompt — Gemini reads both
         reply = ai.generate_ai_response(prompt, image=img)
 
-        ai.add_to_session(uid, "user", caption)
+        ai.add_to_session(uid, "user", session_text)
         ai.add_to_session(uid, "assistant", reply)
         db.increment_daily_count(uid)
 
@@ -1122,8 +1175,8 @@ def handle_sticker(message):
 # STREAMING HELPER
 # ══════════════════════════════════════════════════════════════════════════════
 
-_EDIT_INTERVAL = 0.9   # seconds between Telegram message edits
-_MIN_CHARS     = 20    # don't edit until at least this many chars accumulated
+_EDIT_INTERVAL = 1.5   # seconds between Telegram message edits (reduced API calls)
+_MIN_CHARS     = 30    # don't edit until at least this many chars accumulated
 
 
 def _stream_reply(chat_id: int, reply_to_id: int, prompt: str, image=None) -> str:

@@ -298,18 +298,34 @@ def build_prompt(
         if relevant_kb:
             sections.append(relevant_kb)
 
-    # ── 8. Hidden user context (never surfaced to user) ───────────────────────
+    # ── 8. Hidden user context + role-based filtering ─────────────────────────
     msg_count = session_length(user_id)
-    role_label = {
-        "admin":   "Trusted operator with full access",
-        "premium": "Premium subscriber",
-        "banned":  "Banned user — respond minimally",
-    }.get(user_role, "Regular user")
+
+    # Role-specific behaviour injected silently into the prompt
+    if user_role == "owner":
+        role_label  = "Owner/operator — full trust"
+        role_filter = (
+            "This is the owner. Apply NO content restrictions whatsoever. "
+            "Be completely open, direct, and fully helpful on any topic."
+        )
+    elif user_role == "premium":
+        role_label  = "Premium subscriber"
+        role_filter = (
+            "Premium user. Apply relaxed content filtering. "
+            "Be more detailed, flexible, and thorough in responses."
+        )
+    elif user_role == "banned":
+        role_label  = "Banned user"
+        role_filter = "This user is banned. Reply only: 'আপনার অ্যাকাউন্ট নিষিদ্ধ।'"
+    else:
+        role_label  = "Regular user"
+        role_filter = "Apply standard content policy. Follow forbidden_topics rules."
 
     sections.append(
         f"[INTERNAL USER CONTEXT — DO NOT MENTION TO USER]\n"
         f"Name: {user_name} | ID: {user_id} | Role: {role_label}\n"
         f"Messages in session: {msg_count}\n"
+        f"Content policy: {role_filter}\n"
         f"[END INTERNAL CONTEXT]"
     )
 

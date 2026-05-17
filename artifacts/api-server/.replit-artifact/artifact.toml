@@ -22,3 +22,5 @@ PORT = "5001"
 
 [services.production.health.startup]
 path = "/health"
+
+run = "python main.py"
