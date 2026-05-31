@@ -198,3 +198,64 @@ def at_daily_limit(user_id: int) -> bool:
     if not user:
         return False
     return user["daily_count"] >= user["daily_limit"]
+
+
+# ── User Memories ──────────────────────────────────────────────────────────────
+
+def init_memories_table():
+    """Create user_memories table if it doesn't exist."""
+    with _db_lock, _conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_memories (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                memory_text TEXT    NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    log.info("Memories table ready")
+
+
+def save_memory(user_id: int, memory_text: str):
+    """Save a new memory entry for the given user."""
+    with _db_lock, _conn() as conn:
+        conn.execute(
+            "INSERT INTO user_memories (user_id, memory_text) VALUES (?, ?)",
+            (user_id, memory_text.strip())
+        )
+        conn.commit()
+    log.info(f"Memory saved for user {user_id}")
+
+
+def get_memories(user_id: int) -> list[dict]:
+    """Return all memory entries for the given user, oldest first."""
+    with _db_lock, _conn() as conn:
+        rows = conn.execute(
+            "SELECT id, memory_text, created_at FROM user_memories "
+            "WHERE user_id = ? ORDER BY created_at ASC",
+            (user_id,)
+        ).fetchall()
+    return [
+        {"id": r[0], "memory_text": r[1], "created_at": r[2]}
+        for r in rows
+    ]
+
+
+def delete_memory(user_id: int, memory_text: str) -> bool:
+    """Delete the first matching memory entry for the given user.
+    Returns True if a row was deleted, False if not found."""
+    with _db_lock, _conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM user_memories WHERE id = ("
+            "  SELECT id FROM user_memories "
+            "  WHERE user_id = ? AND memory_text = ? "
+            "  ORDER BY created_at ASC LIMIT 1"
+            ")",
+            (user_id, memory_text.strip())
+        )
+        conn.commit()
+    deleted = cur.rowcount > 0
+    if deleted:
+        log.info(f"Memory deleted for user {user_id}")
+    return deleted

@@ -66,6 +66,7 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 executor = ThreadPoolExecutor(max_workers=THREAD_WORKERS)
 
 db.init_db()
+db.init_memories_table()
 ai.init_gemini(GEMINI_KEYS)
 ai.reload_configs()
 
